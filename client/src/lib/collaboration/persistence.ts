@@ -44,18 +44,68 @@ export async function loadDocumentFromFirebase(docId: string): Promise<Uint8Arra
   }
 }
 
-export function startPeriodicPersistence(ydoc: Y.Doc, docId: string, intervalMs = 15_000) {
+export function startPeriodicPersistence(ydoc: Y.Doc, docId: string, intervalMs = 60_000) {
   let persistenceCount = 0
+  let lastPersistedState: string | null = null
+  let debounceTimer: ReturnType<typeof setTimeout> | null = null
+  let hasChanges = false
   
+  // Track document changes
+  const updateHandler = () => {
+    hasChanges = true
+    
+    // Debounce rapid changes to avoid excessive saves
+    if (debounceTimer) {
+      clearTimeout(debounceTimer)
+    }
+    
+    debounceTimer = setTimeout(async () => {
+      if (hasChanges) {
+        try {
+          const currentState = uint8ArrayToBase64(Y.encodeStateAsUpdate(ydoc))
+          if (currentState !== lastPersistedState) {
+            await persistDocument(ydoc, docId, persistenceCount++)
+            lastPersistedState = currentState
+            hasChanges = false
+            console.log(`Document ${docId} persisted due to changes (version ${persistenceCount - 1})`)
+          }
+        } catch (err) {
+          console.warn('debounced persistence failed', err)
+        }
+      }
+    }, 2000) // 2 second debounce
+  }
+  
+  // Listen for document updates
+  ydoc.on('update', updateHandler)
+  
+  // Periodic check as backup (only persists if there are unsynced changes)
   const timer = setInterval(async () => {
     try {
-      await persistDocument(ydoc, docId, persistenceCount++)
+      if (hasChanges) {
+        const currentState = uint8ArrayToBase64(Y.encodeStateAsUpdate(ydoc))
+        if (currentState !== lastPersistedState) {
+          await persistDocument(ydoc, docId, persistenceCount++)
+          lastPersistedState = currentState
+          hasChanges = false
+          console.log(`Document ${docId} persisted via periodic check (version ${persistenceCount - 1})`)
+        }
+      }
     } catch (err) {
       console.warn('periodic persistence failed', err)
     }
   }, intervalMs)
 
-  return () => clearInterval(timer)
+  // Initialize the last persisted state
+  lastPersistedState = uint8ArrayToBase64(Y.encodeStateAsUpdate(ydoc))
+
+  return () => {
+    ydoc.off('update', updateHandler)
+    clearInterval(timer)
+    if (debounceTimer) {
+      clearTimeout(debounceTimer)
+    }
+  }
 }
 
 export async function persistDocument(ydoc: Y.Doc, docId: string, version?: number): Promise<void> {
@@ -96,6 +146,123 @@ export async function persistDocument(ydoc: Y.Doc, docId: string, version?: numb
   } catch (error) {
     console.error('Failed to persist document:', error)
     throw error
+  }
+}
+
+/**
+ * Force immediate persistence if document has changes
+ */
+export async function persistDocumentIfChanged(ydoc: Y.Doc, docId: string, lastKnownState?: string, version?: number): Promise<boolean> {
+  try {
+    const currentState = uint8ArrayToBase64(Y.encodeStateAsUpdate(ydoc))
+    
+    // Only persist if document actually changed
+    if (lastKnownState && currentState === lastKnownState) {
+      console.log(`Document ${docId} unchanged, skipping persistence`)
+      return false
+    }
+    
+    await persistDocument(ydoc, docId, version)
+    console.log(`Document ${docId} persisted due to changes`)
+    return true
+  } catch (error) {
+    console.error('Failed to persist document changes:', error)
+    throw error
+  }
+}
+
+/**
+ * Get document state hash for change detection
+ */
+export function getDocumentStateHash(ydoc: Y.Doc): string {
+  return uint8ArrayToBase64(Y.encodeStateAsUpdate(ydoc))
+}
+
+/**
+ * Enhanced persistence with configurable options
+ */
+export function startSmartPersistence(
+  ydoc: Y.Doc, 
+  docId: string, 
+  options: {
+    intervalMs?: number
+    debounceMs?: number
+    maxIdleTimeMs?: number
+    onPersist?: (docId: string, version: number) => void
+  } = {}
+) {
+  const {
+    intervalMs = 60_000, // 1 minute default
+    debounceMs = 2_000,  // 2 second debounce
+    maxIdleTimeMs = 300_000, // 5 minutes max idle
+    onPersist
+  } = options
+  
+  let persistenceCount = 0
+  let lastPersistedState: string | null = null
+  let debounceTimer: ReturnType<typeof setTimeout> | null = null
+  let lastActivity = Date.now()
+  let hasChanges = false
+  
+  const updateHandler = () => {
+    hasChanges = true
+    lastActivity = Date.now()
+    
+    if (debounceTimer) {
+      clearTimeout(debounceTimer)
+    }
+    
+    debounceTimer = setTimeout(async () => {
+      if (hasChanges) {
+        try {
+          const currentState = getDocumentStateHash(ydoc)
+          if (currentState !== lastPersistedState) {
+            await persistDocument(ydoc, docId, persistenceCount++)
+            lastPersistedState = currentState
+            hasChanges = false
+            onPersist?.(docId, persistenceCount - 1)
+          }
+        } catch (err) {
+          console.warn('Smart persistence failed:', err)
+        }
+      }
+    }, debounceMs)
+  }
+  
+  ydoc.on('update', updateHandler)
+  
+  const timer = setInterval(async () => {
+    try {
+      const now = Date.now()
+      const idleTime = now - lastActivity
+      
+      // Skip persistence if document has been idle too long
+      if (idleTime > maxIdleTimeMs && !hasChanges) {
+        return
+      }
+      
+      if (hasChanges) {
+        const currentState = getDocumentStateHash(ydoc)
+        if (currentState !== lastPersistedState) {
+          await persistDocument(ydoc, docId, persistenceCount++)
+          lastPersistedState = currentState
+          hasChanges = false
+          onPersist?.(docId, persistenceCount - 1)
+        }
+      }
+    } catch (err) {
+      console.warn('Periodic smart persistence failed:', err)
+    }
+  }, intervalMs)
+
+  lastPersistedState = getDocumentStateHash(ydoc)
+
+  return () => {
+    ydoc.off('update', updateHandler)
+    clearInterval(timer)
+    if (debounceTimer) {
+      clearTimeout(debounceTimer)
+    }
   }
 }
 
