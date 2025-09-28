@@ -5,6 +5,23 @@
     <link rel="icon" type="image/svg+xml" href="/vite.svg" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>client</title>
+    <script>
+      // Comprehensive process polyfill for browser compatibility
+      if (typeof process === 'undefined') {
+        window.process = {
+          env: {},
+          version: 'v18.0.0',
+          platform: 'browser',
+          nextTick: function(callback, ...args) {
+            // Use setTimeout as a fallback for process.nextTick
+            setTimeout(() => callback(...args), 0);
+          },
+          cwd: function() { return '/'; },
+          chdir: function() {},
+          umask: function() { return 0; }
+        };
+      }
+    </script>
   </head>
   <body>
     <div id="root"></div>
