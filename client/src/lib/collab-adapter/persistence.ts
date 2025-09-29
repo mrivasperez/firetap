@@ -1,5 +1,5 @@
 import * as Y from 'yjs'
-import { rtdb } from '../../firebase'
+import type { Database } from 'firebase/database'
 import { ref, set, get, serverTimestamp, runTransaction } from 'firebase/database'
 import { buildDatabasePaths, type DatabasePathsConfig } from './config'
 
@@ -11,7 +11,7 @@ export type DocumentSnapshot = {
   checksum: string
 }
 
-export async function loadDocumentFromFirebase(docId: string, databasePaths?: DatabasePathsConfig): Promise<Uint8Array | null> {
+export async function loadDocumentFromFirebase(rtdb: Database, docId: string, databasePaths?: DatabasePathsConfig): Promise<Uint8Array | null> {
   try {
     const paths = buildDatabasePaths(databasePaths || { structure: 'flat', flat: { documents: '/documents', rooms: '/rooms', snapshots: '/snapshots', signaling: '/signaling' } }, docId)
     
@@ -44,7 +44,7 @@ export async function loadDocumentFromFirebase(docId: string, databasePaths?: Da
   }
 }
 
-export function startPeriodicPersistence(ydoc: Y.Doc, docId: string, intervalMs = 60_000, databasePaths?: DatabasePathsConfig) {
+export function startPeriodicPersistence(rtdb: Database, ydoc: Y.Doc, docId: string, intervalMs = 60_000, databasePaths?: DatabasePathsConfig) {
   let persistenceCount = 0
   let lastPersistedState: string | null = null
   let debounceTimer: ReturnType<typeof setTimeout> | null = null
@@ -64,7 +64,7 @@ export function startPeriodicPersistence(ydoc: Y.Doc, docId: string, intervalMs 
         try {
           const currentState = uint8ArrayToBase64(Y.encodeStateAsUpdate(ydoc))
           if (currentState !== lastPersistedState) {
-            await persistDocument(ydoc, docId, persistenceCount++, databasePaths)
+            await persistDocument(rtdb, ydoc, docId, persistenceCount++, databasePaths)
             lastPersistedState = currentState
             hasChanges = false
             console.log(`Document ${docId} persisted due to changes (version ${persistenceCount - 1})`)
@@ -85,7 +85,7 @@ export function startPeriodicPersistence(ydoc: Y.Doc, docId: string, intervalMs 
       if (hasChanges) {
         const currentState = uint8ArrayToBase64(Y.encodeStateAsUpdate(ydoc))
         if (currentState !== lastPersistedState) {
-          await persistDocument(ydoc, docId, persistenceCount++, databasePaths)
+          await persistDocument(rtdb, ydoc, docId, persistenceCount++, databasePaths)
           lastPersistedState = currentState
           hasChanges = false
           console.log(`Document ${docId} persisted via periodic check (version ${persistenceCount - 1})`)
@@ -108,7 +108,7 @@ export function startPeriodicPersistence(ydoc: Y.Doc, docId: string, intervalMs 
   }
 }
 
-export async function persistDocument(ydoc: Y.Doc, docId: string, version?: number, databasePaths?: DatabasePathsConfig): Promise<void> {
+export async function persistDocument(rtdb: Database, ydoc: Y.Doc, docId: string, version?: number, databasePaths?: DatabasePathsConfig): Promise<void> {
   try {
     const paths = buildDatabasePaths(databasePaths || { structure: 'flat', flat: { documents: '/documents', rooms: '/rooms', snapshots: '/snapshots', signaling: '/signaling' } }, docId)
     
@@ -154,7 +154,7 @@ export async function persistDocument(ydoc: Y.Doc, docId: string, version?: numb
 /**
  * Force immediate persistence if document has changes
  */
-export async function persistDocumentIfChanged(ydoc: Y.Doc, docId: string, lastKnownState?: string, version?: number, databasePaths?: DatabasePathsConfig): Promise<boolean> {
+export async function persistDocumentIfChanged(rtdb: Database, ydoc: Y.Doc, docId: string, lastKnownState?: string, version?: number, databasePaths?: DatabasePathsConfig): Promise<boolean> {
   try {
     const currentState = uint8ArrayToBase64(Y.encodeStateAsUpdate(ydoc))
     
@@ -164,7 +164,7 @@ export async function persistDocumentIfChanged(ydoc: Y.Doc, docId: string, lastK
       return false
     }
     
-    await persistDocument(ydoc, docId, version, databasePaths)
+    await persistDocument(rtdb, ydoc, docId, version, databasePaths)
     console.log(`Document ${docId} persisted due to changes`)
     return true
   } catch (error) {
@@ -184,19 +184,21 @@ export function getDocumentStateHash(ydoc: Y.Doc): string {
  * Enhanced persistence with configurable options
  */
 export function startSmartPersistence(
-  ydoc: Y.Doc, 
-  docId: string, 
+  rtdb: Database,
+  ydoc: Y.Doc,
+  docId: string,
   options: {
     intervalMs?: number
     debounceMs?: number
+    maxBufferSize?: number
     maxIdleTimeMs?: number
-    onPersist?: (docId: string, version: number) => void
+    onPersist?: (version: number) => void
     databasePaths?: DatabasePathsConfig
   } = {}
 ) {
   const {
-    intervalMs = 60_000, // 1 minute default
-    debounceMs = 2_000,  // 2 second debounce
+    intervalMs = 60_000,
+    debounceMs = 2_000,
     maxIdleTimeMs = 300_000, // 5 minutes max idle
     onPersist,
     databasePaths
@@ -221,10 +223,10 @@ export function startSmartPersistence(
         try {
           const currentState = getDocumentStateHash(ydoc)
           if (currentState !== lastPersistedState) {
-            await persistDocument(ydoc, docId, persistenceCount++, databasePaths)
+            await persistDocument(rtdb, ydoc, docId, persistenceCount++, databasePaths)
             lastPersistedState = currentState
             hasChanges = false
-            onPersist?.(docId, persistenceCount - 1)
+            onPersist?.(persistenceCount - 1)
           }
         } catch (err) {
           console.warn('Smart persistence failed:', err)
@@ -248,10 +250,10 @@ export function startSmartPersistence(
       if (hasChanges) {
         const currentState = getDocumentStateHash(ydoc)
         if (currentState !== lastPersistedState) {
-          await persistDocument(ydoc, docId, persistenceCount++, databasePaths)
+          await persistDocument(rtdb, ydoc, docId, persistenceCount++, databasePaths)
           lastPersistedState = currentState
           hasChanges = false
-          onPersist?.(docId, persistenceCount - 1)
+          onPersist?.(persistenceCount - 1)
         }
       }
     } catch (err) {
@@ -270,7 +272,7 @@ export function startSmartPersistence(
   }
 }
 
-export async function createDocumentSnapshot(ydoc: Y.Doc, docId: string, label?: string, databasePaths?: DatabasePathsConfig): Promise<void> {
+export async function createDocumentSnapshot(rtdb: Database, ydoc: Y.Doc, docId: string, label?: string, databasePaths?: DatabasePathsConfig): Promise<void> {
   try {
     const paths = buildDatabasePaths(databasePaths || { structure: 'flat', flat: { documents: '/documents', rooms: '/rooms', snapshots: '/snapshots', signaling: '/signaling' } }, docId)
     
@@ -300,7 +302,7 @@ export async function createDocumentSnapshot(ydoc: Y.Doc, docId: string, label?:
   }
 }
 
-export async function loadDocumentSnapshot(docId: string, snapshotKey: string, databasePaths?: DatabasePathsConfig): Promise<Uint8Array | null> {
+export async function loadDocumentSnapshot(rtdb: Database, docId: string, snapshotKey: string, databasePaths?: DatabasePathsConfig): Promise<Uint8Array | null> {
   try {
     const paths = buildDatabasePaths(databasePaths || { structure: 'flat', flat: { documents: '/documents', rooms: '/rooms', snapshots: '/snapshots', signaling: '/signaling' } }, docId)
     
@@ -317,7 +319,7 @@ export async function loadDocumentSnapshot(docId: string, snapshotKey: string, d
   }
 }
 
-export async function getDocumentVersion(docId: string, databasePaths?: DatabasePathsConfig): Promise<number | null> {
+export async function getDocumentVersion(rtdb: Database, docId: string, databasePaths?: DatabasePathsConfig): Promise<number | null> {
   try {
     const paths = buildDatabasePaths(databasePaths || { structure: 'flat', flat: { documents: '/documents', rooms: '/rooms', snapshots: '/snapshots', signaling: '/signaling' } }, docId)
     
@@ -333,6 +335,8 @@ export async function getDocumentVersion(docId: string, databasePaths?: Database
     return null
   }
 }
+
+
 
 // Utility functions
 function uint8ArrayToBase64(uint8Array: Uint8Array): string {

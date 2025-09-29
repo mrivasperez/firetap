@@ -5,6 +5,7 @@ import Collaboration from '@tiptap/extension-collaboration'
 import CollaborationCaret from '@tiptap/extension-collaboration-caret'
 import { Placeholder } from '@tiptap/extensions'
 import { createFirebaseYWebrtcAdapter, type AdapterHandle } from '../lib/collab-adapter'
+import { rtdb } from '../firebase'
 import './CollaborativeEditor.css'
 
 type Props = { 
@@ -73,6 +74,7 @@ export default function CollaborativeEditor({
         
         handle = await createFirebaseYWebrtcAdapter({ 
           docId,
+          firebaseDatabase: rtdb, // Add required Firebase database instance
           user: { name: userName, color: userColor },
           syncIntervalMs: 15000, // 15 second sync interval
           maxDirectPeers: 6, // Reasonable cluster size

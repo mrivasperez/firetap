@@ -85,7 +85,7 @@ export const DEFAULT_CONFIG: CollaborationConfig = {
 
 export function createAdapterConfig(
   config: Partial<CollaborationConfig>
-): AdapterOptions {
+): Omit<AdapterOptions, 'firebaseDatabase'> {
   const mergedConfig = { ...DEFAULT_CONFIG, ...config };
 
   return {
@@ -104,6 +104,42 @@ export function createAdapterConfig(
 
 export function generateUserId(): string {
   return `user-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
+}
+
+// Configuration creators (return partial configs - user must add firebaseDatabase)
+export function createSimpleConfig(docId: string, user: { name: string; color?: string }): Omit<AdapterOptions, 'firebaseDatabase'> {
+  return {
+    docId,
+    user,
+    maxDirectPeers: 6,
+    syncIntervalMs: 15000,
+    databasePaths: DEFAULT_DATABASE_PATHS
+  };
+}
+
+export function createWorkspaceConfig(
+  docId: string, 
+  workspaceId: string, 
+  user: { name: string; color?: string }
+): Omit<AdapterOptions, 'firebaseDatabase'> {
+  return {
+    docId,
+    user,
+    maxDirectPeers: 6,
+    syncIntervalMs: 15000,
+    databasePaths: {
+      structure: 'nested',
+      nested: {
+        basePath: `/${workspaceId}/documents`,
+        subPaths: {
+          documents: 'documents',
+          rooms: 'rooms', 
+          snapshots: 'snapshots',
+          signaling: 'signaling'
+        }
+      }
+    }
+  };
 }
 
 export function validateConfig(config: Partial<CollaborationConfig>): string[] {

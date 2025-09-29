@@ -3,14 +3,16 @@ import { Awareness } from 'y-protocols/awareness'
 import SimplePeer from 'simple-peer'
 import { startPeriodicPersistence, loadDocumentFromFirebase } from './persistence'
 import { announcePresence, stopAnnouncingPresence, type PeerInfo } from './cluster'
-import { rtdb } from '../../firebase'
+import type { Database } from 'firebase/database'
 import { ref, set, remove, onValue, push, off } from 'firebase/database'
 import { encodeAwarenessUpdate, applyAwarenessUpdate } from 'y-protocols/awareness'
 
-import { type DatabasePathsConfig, buildDatabasePaths } from './config'
+import { type DatabasePathsConfig, buildDatabasePaths, type ConnectionState } from './config'
 
 export type AdapterOptions = {
   docId: string
+  // Firebase database instance (required for dependency injection)
+  firebaseDatabase: Database
   peerId?: string
   user?: { name?: string; color?: string }
   syncIntervalMs?: number
@@ -18,12 +20,24 @@ export type AdapterOptions = {
   databasePaths?: DatabasePathsConfig
 }
 
+// Event types for the adapter
+export type AdapterEvents = {
+  'connection-state-changed': { state: ConnectionState }
+  'peer-joined': { peerId: string; user: PeerInfo }
+  'peer-left': { peerId: string }
+  'document-persisted': { docId: string; version: number }
+  'error': { error: Error; context: string }
+  'sync-completed': { docId: string; updateSize: number }
+  'awareness-updated': { peerId: string; user: PeerInfo }
+}
+
 export type AdapterHandle = {
   ydoc: Y.Doc
   awareness: Awareness
   disconnect: () => void
+  reconnect: () => Promise<void>
   getPeerCount: () => number
-  getConnectionStatus: () => 'connecting' | 'connected' | 'disconnected'
+  getConnectionStatus: () => ConnectionState
   getUserInfo: () => PeerInfo
   getMemoryStats: () => {
     messageBuffer: number
@@ -32,6 +46,8 @@ export type AdapterHandle = {
     awarenessStates: number
   }
   forceGarbageCollection: () => void
+  on: <K extends keyof AdapterEvents>(event: K, callback: (data: AdapterEvents[K]) => void) => void
+  off: <K extends keyof AdapterEvents>(event: K, callback: (data: AdapterEvents[K]) => void) => void
 }
 
 type SignalData = {
@@ -48,6 +64,49 @@ class SimplePeerManager {
   private ydoc: Y.Doc
   private awareness: Awareness
   private databasePaths: DatabasePathsConfig
+  private rtdb: Database
+  private eventListeners: Map<keyof AdapterEvents, Set<(data: AdapterEvents[keyof AdapterEvents]) => void>> = new Map()
+
+  // Event system methods
+  emit<K extends keyof AdapterEvents>(event: K, data: AdapterEvents[K]): void {
+    const listeners = this.eventListeners.get(event)
+    if (listeners) {
+      listeners.forEach(callback => callback(data))
+    }
+  }
+
+  on<K extends keyof AdapterEvents>(event: K, callback: (data: AdapterEvents[K]) => void): void {
+    if (!this.eventListeners.has(event)) {
+      this.eventListeners.set(event, new Set())
+    }
+    this.eventListeners.get(event)!.add(callback as (data: AdapterEvents[keyof AdapterEvents]) => void)
+  }
+
+  off<K extends keyof AdapterEvents>(event: K, callback: (data: AdapterEvents[K]) => void): void {
+    const listeners = this.eventListeners.get(event)
+    if (listeners) {
+      listeners.delete(callback as (data: AdapterEvents[keyof AdapterEvents]) => void)
+    }
+  }
+
+  async reconnect(): Promise<void> {
+    console.log('Reconnecting adapter...')
+    this.connectionStatus = 'connecting'
+    this.emit('connection-state-changed', { state: 'connecting' })
+    try {
+      // Clean up existing connections
+      this.destroy()
+      // Re-initialize
+      await this.initialize()
+      this.connectionStatus = 'connected'
+      this.emit('connection-state-changed', { state: 'connected' })
+    } catch (error) {
+      this.connectionStatus = 'disconnected'
+      this.emit('error', { error: error as Error, context: 'reconnection' })
+      this.emit('connection-state-changed', { state: 'disconnected' })
+      throw error
+    }
+  }
   private peers = new Map<string, SimplePeer.Instance>()
   private signalingRef: ReturnType<typeof ref> | null = null
   private connectionStatus: 'connecting' | 'connected' | 'disconnected' = 'connecting'
@@ -58,11 +117,12 @@ class SimplePeerManager {
   private messageBuffer: Array<{ timestamp: number, size: number }> = []
   private maxBufferSize = 1000
   
-  constructor(docId: string, peerId: string, ydoc: Y.Doc, awareness: Awareness, databasePaths: DatabasePathsConfig) {
+  constructor(docId: string, peerId: string, ydoc: Y.Doc, awareness: Awareness, rtdb: Database, databasePaths: DatabasePathsConfig) {
     this.docId = docId
     this.peerId = peerId
     this.ydoc = ydoc
     this.awareness = awareness
+    this.rtdb = rtdb
     this.databasePaths = databasePaths
   }
 
@@ -72,20 +132,20 @@ class SimplePeerManager {
 
   async initialize(): Promise<void> {
     // Set up signaling listener
-    this.signalingRef = ref(rtdb, `${this.getPaths().signaling}/${this.peerId}`)
+    this.signalingRef = ref(this.rtdb, `${this.getPaths().signaling}/${this.peerId}`)
     onValue(this.signalingRef, (snapshot) => {
       if (snapshot.exists()) {
         const signals = snapshot.val()
         Object.entries(signals).forEach(([key, signal]) => {
           this.handleSignalData(signal as SignalData)
           // Clean up processed signal
-          remove(ref(rtdb, `${this.getPaths().signaling}/${this.peerId}/${key}`))
+          remove(ref(this.rtdb, `${this.getPaths().signaling}/${this.peerId}/${key}`))
         })
       }
     })
 
     // Listen for other peers joining
-    const peersRef = ref(rtdb, `${this.getPaths().rooms}/peers`)
+    const peersRef = ref(this.rtdb, `${this.getPaths().rooms}/peers`)
     onValue(peersRef, (snapshot) => {
       if (snapshot.exists()) {
         const peers = snapshot.val()
@@ -192,7 +252,7 @@ class SimplePeerManager {
       timestamp: Date.now()
     }
     
-    const messageRef = push(ref(rtdb, `${this.getPaths().signaling}/${targetPeerId}`))
+    const messageRef = push(ref(this.rtdb, `${this.getPaths().signaling}/${targetPeerId}`))
     await set(messageRef, signalData)
   }
 
@@ -343,6 +403,7 @@ class SimplePeerManager {
 export async function createFirebaseYWebrtcAdapter(opts: AdapterOptions): Promise<AdapterHandle> {
   const { 
     docId, 
+    firebaseDatabase,
     peerId = crypto.randomUUID(), 
     user = {}, 
     syncIntervalMs = 15_000,
@@ -366,7 +427,7 @@ export async function createFirebaseYWebrtcAdapter(opts: AdapterOptions): Promis
 
   // 2) Load persisted state from Firebase (if any)
   try {
-    const loaded = await loadDocumentFromFirebase(docId, databasePaths)
+    const loaded = await loadDocumentFromFirebase(firebaseDatabase, docId, databasePaths)
     if (loaded) {
       Y.applyUpdate(ydoc, loaded)
     }
@@ -383,7 +444,7 @@ export async function createFirebaseYWebrtcAdapter(opts: AdapterOptions): Promis
   }
 
   // 4) Create SimplePeer manager
-  const peerManager = new SimplePeerManager(docId, peerId, ydoc, awareness, databasePaths || { structure: 'flat', flat: { documents: '/documents', rooms: '/rooms', snapshots: '/snapshots', signaling: '/signaling' } })
+  const peerManager = new SimplePeerManager(docId, peerId, ydoc, awareness, firebaseDatabase, databasePaths || { structure: 'flat', flat: { documents: '/documents', rooms: '/rooms', snapshots: '/snapshots', signaling: '/signaling' } })
 
   // 5) Set up Y.js event handlers
   ydoc.on('update', (update: Uint8Array) => {
@@ -408,14 +469,14 @@ export async function createFirebaseYWebrtcAdapter(opts: AdapterOptions): Promis
   // 7) Announce presence in Firebase
   let presenceCleanup: (() => void) | null = null
   try {
-    await announcePresence(docId, peerInfo, databasePaths)
-    presenceCleanup = () => stopAnnouncingPresence(docId, peerId, databasePaths)
+    await announcePresence(firebaseDatabase, docId, peerInfo, databasePaths)
+    presenceCleanup = () => stopAnnouncingPresence(firebaseDatabase, docId, peerId, databasePaths)
   } catch (e) {
     console.warn('Failed to announce presence in Firebase:', e)
   }
 
   // 8) Start periodic persistence
-  const stopPersistence = startPeriodicPersistence(ydoc, docId, syncIntervalMs, databasePaths)
+  const stopPersistence = startPeriodicPersistence(firebaseDatabase, ydoc, docId, syncIntervalMs, databasePaths)
 
   // 9) Initialize peer connections
   await peerManager.initialize()
@@ -497,6 +558,7 @@ export async function createFirebaseYWebrtcAdapter(opts: AdapterOptions): Promis
     ydoc, 
     awareness,
     disconnect,
+    reconnect: () => peerManager.reconnect(),
     getPeerCount: () => peerManager.getPeerCount(),
     getConnectionStatus: () => peerManager.getConnectionStatus(),
     getUserInfo: () => peerInfo,
@@ -511,7 +573,11 @@ export async function createFirebaseYWebrtcAdapter(opts: AdapterOptions): Promis
         tempDoc.destroy()
         console.log('Forced garbage collection completed')
       }
-    }
+    },
+    on: <K extends keyof AdapterEvents>(event: K, callback: (data: AdapterEvents[K]) => void) => 
+      peerManager.on(event, callback),
+    off: <K extends keyof AdapterEvents>(event: K, callback: (data: AdapterEvents[K]) => void) => 
+      peerManager.off(event, callback)
   }
 }
 

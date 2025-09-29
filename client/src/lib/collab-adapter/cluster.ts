@@ -1,4 +1,4 @@
-import { rtdb } from '../../firebase'
+import type { Database } from 'firebase/database'
 import { ref, set, remove } from 'firebase/database'
 import { buildDatabasePaths, type DatabasePathsConfig } from './config'
 
@@ -9,7 +9,7 @@ export type PeerInfo = {
   connectedAt: number
 }
 
-export async function announcePresence(docId: string, peer: PeerInfo, databasePaths?: DatabasePathsConfig): Promise<void> {
+export async function announcePresence(rtdb: Database, docId: string, peer: PeerInfo, databasePaths?: DatabasePathsConfig): Promise<void> {
   try {
     const paths = buildDatabasePaths(databasePaths || { structure: 'flat', flat: { documents: '/documents', rooms: '/rooms', snapshots: '/snapshots', signaling: '/signaling' } }, docId)
     const peerRef = ref(rtdb, `${paths.rooms}/peers/${peer.id}`)
@@ -26,7 +26,7 @@ export async function announcePresence(docId: string, peer: PeerInfo, databasePa
   }
 }
 
-export async function stopAnnouncingPresence(docId: string, peerId: string, databasePaths?: DatabasePathsConfig): Promise<void> {
+export async function stopAnnouncingPresence(rtdb: Database, docId: string, peerId: string, databasePaths?: DatabasePathsConfig): Promise<void> {
   try {
     const paths = buildDatabasePaths(databasePaths || { structure: 'flat', flat: { documents: '/documents', rooms: '/rooms', snapshots: '/snapshots', signaling: '/signaling' } }, docId)
     const peerRef = ref(rtdb, `${paths.rooms}/peers/${peerId}`)
