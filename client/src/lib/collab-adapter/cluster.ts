@@ -19,7 +19,6 @@ export async function announcePresence(rtdb: Database, docId: string, peer: Peer
       lastSeen: Date.now()
     }
     await set(peerRef, peerWithTimestamp)
-    console.log(`Announced presence for peer ${peer.id} in document ${docId}`)
   } catch (error) {
     console.error('Failed to announce presence:', error)
     throw error
@@ -31,7 +30,6 @@ export async function stopAnnouncingPresence(rtdb: Database, docId: string, peer
     const paths = buildDatabasePaths(databasePaths || { structure: 'flat', flat: { documents: '/documents', rooms: '/rooms', snapshots: '/snapshots', signaling: '/signaling' } }, docId)
     const peerRef = ref(rtdb, `${paths.rooms}/peers/${peerId}`)
     await remove(peerRef)
-    console.log(`Removed presence for peer ${peerId} from document ${docId}`)
   } catch (error) {
     console.warn('Failed to remove presence:', error)
     // Don't throw here as it's cleanup

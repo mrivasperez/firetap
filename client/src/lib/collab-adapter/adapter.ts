@@ -90,7 +90,6 @@ class SimplePeerManager {
   }
 
   async reconnect(): Promise<void> {
-    console.log('Reconnecting adapter...')
     this.connectionStatus = 'connecting'
     this.emit('connection-state-changed', { state: 'connecting' })
     try {
@@ -150,17 +149,13 @@ class SimplePeerManager {
       if (snapshot.exists()) {
         const peers = snapshot.val()
         const currentPeerIds = Object.keys(peers)
-        console.log(`Found ${currentPeerIds.length} peers in room:`, currentPeerIds)
         
         currentPeerIds.forEach(otherPeerId => {
           if (otherPeerId !== this.peerId && !this.peers.has(otherPeerId)) {
             // Only create connection if we should be the initiator (deterministic)
             const shouldInitiate = this.peerId < otherPeerId
             if (shouldInitiate) {
-              console.log(`Initiating connection to ${otherPeerId}`)
               this.createPeerConnection(otherPeerId, true)
-            } else {
-              console.log(`Waiting for ${otherPeerId} to initiate connection`)
             }
           }
         })
@@ -173,7 +168,6 @@ class SimplePeerManager {
   private createPeerConnection(otherPeerId: string, initiator: boolean): void {
     // Check if peer connection already exists
     if (this.peers.has(otherPeerId)) {
-      console.log(`Peer connection to ${otherPeerId} already exists, skipping`)
       return
     }
     
@@ -182,8 +176,6 @@ class SimplePeerManager {
       console.warn(`Maximum peer connections reached (${this.maxPeers}), rejecting new connection to ${otherPeerId}`)
       return
     }
-    
-    console.log(`Creating peer connection to ${otherPeerId} (initiator: ${initiator})`)
     
     const peer = new SimplePeer({
       initiator,
@@ -202,7 +194,6 @@ class SimplePeerManager {
     })
 
     peer.on('connect', () => {
-      console.log(`Connected to peer ${otherPeerId}`)
       // Send current document state
       const update = Y.encodeStateAsUpdate(this.ydoc)
       peer.send(JSON.stringify({ type: 'sync', update: Array.from(update) }))
@@ -236,7 +227,6 @@ class SimplePeerManager {
     })
 
     peer.on('close', () => {
-      console.log(`Peer connection closed with ${otherPeerId}`)
       this.peers.delete(otherPeerId)
     })
 
@@ -332,7 +322,6 @@ class SimplePeerManager {
     
     this.peers.forEach((peer, peerId) => {
       if (!peer.connected && (now - this.memoryStats.lastCleanup) > idleTimeout) {
-        console.log(`Cleaning up idle peer connection: ${peerId}`)
         peer.destroy()
         this.peers.delete(peerId)
       }
@@ -489,23 +478,14 @@ export async function createFirebaseYWebrtcAdapter(opts: AdapterOptions): Promis
       
       // Trigger Y.js garbage collection
       if (ydoc.gc) {
-        const beforeSize = Y.encodeStateAsUpdate(ydoc).length
         // Force GC by encoding/decoding document state
         const state = Y.encodeStateAsUpdate(ydoc)
         const tempDoc = new Y.Doc()
         tempDoc.gc = true
         Y.applyUpdate(tempDoc, state)
-        const afterSize = Y.encodeStateAsUpdate(tempDoc).length
-        
-        if (beforeSize !== afterSize) {
-          console.log(`Y.js GC: reduced document size from ${beforeSize} to ${afterSize} bytes`)
-        }
         tempDoc.destroy()
       }
       
-      // Log memory stats
-      const memStats = peerManager.getMemoryStats()
-      console.log('Memory stats:', memStats)
       
       // Clean up awareness states if needed
       const awarenessStates = awareness.getStates()
@@ -571,7 +551,6 @@ export async function createFirebaseYWebrtcAdapter(opts: AdapterOptions): Promis
         tempDoc.gc = true
         Y.applyUpdate(tempDoc, state)
         tempDoc.destroy()
-        console.log('Forced garbage collection completed')
       }
     },
     on: <K extends keyof AdapterEvents>(event: K, callback: (data: AdapterEvents[K]) => void) => 

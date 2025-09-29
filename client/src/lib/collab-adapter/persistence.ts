@@ -22,7 +22,6 @@ export async function loadDocumentFromFirebase(rtdb: Database, docId: string, da
     if (snapshotSnap.exists()) {
       const snapshot = snapshotSnap.val() as DocumentSnapshot
       const binary = base64ToUint8Array(snapshot.update)
-      console.log(`Loaded document ${docId} from snapshot (version ${snapshot.version})`)
       return binary
     }
 
@@ -36,7 +35,6 @@ export async function loadDocumentFromFirebase(rtdb: Database, docId: string, da
     if (typeof base64 !== 'string') return null
     
     const binary = base64ToUint8Array(base64)
-    console.log(`Loaded document ${docId} from documents collection`)
     return binary
   } catch (e) {
     console.warn('loadDocumentFromFirebase error', e)
@@ -67,7 +65,6 @@ export function startPeriodicPersistence(rtdb: Database, ydoc: Y.Doc, docId: str
             await persistDocument(rtdb, ydoc, docId, persistenceCount++, databasePaths)
             lastPersistedState = currentState
             hasChanges = false
-            console.log(`Document ${docId} persisted due to changes (version ${persistenceCount - 1})`)
           }
         } catch (err) {
           console.warn('debounced persistence failed', err)
@@ -88,7 +85,6 @@ export function startPeriodicPersistence(rtdb: Database, ydoc: Y.Doc, docId: str
           await persistDocument(rtdb, ydoc, docId, persistenceCount++, databasePaths)
           lastPersistedState = currentState
           hasChanges = false
-          console.log(`Document ${docId} persisted via periodic check (version ${persistenceCount - 1})`)
         }
       }
     } catch (err) {
@@ -144,7 +140,6 @@ export async function persistDocument(rtdb: Database, ydoc: Y.Doc, docId: string
       version: snapshot.version
     })
 
-    console.log(`Document ${docId} persisted (version ${snapshot.version}, size: ${update.length} bytes)`)
   } catch (error) {
     console.error('Failed to persist document:', error)
     throw error
@@ -160,12 +155,10 @@ export async function persistDocumentIfChanged(rtdb: Database, ydoc: Y.Doc, docI
     
     // Only persist if document actually changed
     if (lastKnownState && currentState === lastKnownState) {
-      console.log(`Document ${docId} unchanged, skipping persistence`)
       return false
     }
     
     await persistDocument(rtdb, ydoc, docId, version, databasePaths)
-    console.log(`Document ${docId} persisted due to changes`)
     return true
   } catch (error) {
     console.error('Failed to persist document changes:', error)
@@ -294,8 +287,6 @@ export async function createDocumentSnapshot(rtdb: Database, ydoc: Y.Doc, docId:
     const snapshotKey = label ? `${label}_${timestamp}` : `snapshot_${timestamp}`
     
     await set(ref(rtdb, `${paths.snapshots}/${snapshotKey}`), snapshot)
-    
-    console.log(`Created snapshot ${snapshotKey} for document ${docId}`)
   } catch (error) {
     console.error('Failed to create snapshot:', error)
     throw error
