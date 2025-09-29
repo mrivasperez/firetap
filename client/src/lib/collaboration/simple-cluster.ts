@@ -1,5 +1,6 @@
 import { rtdb } from '../../firebase'
 import { ref, set, remove } from 'firebase/database'
+import { buildDatabasePaths, type DatabasePathsConfig } from './config'
 
 export type PeerInfo = {
   id: string
@@ -8,11 +9,10 @@ export type PeerInfo = {
   connectedAt: number
 }
 
-const ROOMS_BASE = '/rooms'
-
-export async function announcePresence(docId: string, peer: PeerInfo): Promise<void> {
+export async function announcePresence(docId: string, peer: PeerInfo, databasePaths?: DatabasePathsConfig): Promise<void> {
   try {
-    const peerRef = ref(rtdb, `${ROOMS_BASE}/${docId}/peers/${peer.id}`)
+    const paths = buildDatabasePaths(databasePaths || { structure: 'flat', flat: { documents: '/documents', rooms: '/rooms', snapshots: '/snapshots', signaling: '/signaling' } }, docId)
+    const peerRef = ref(rtdb, `${paths.rooms}/peers/${peer.id}`)
     // Add current timestamp for presence cleanup
     const peerWithTimestamp = {
       ...peer,
@@ -26,9 +26,10 @@ export async function announcePresence(docId: string, peer: PeerInfo): Promise<v
   }
 }
 
-export async function stopAnnouncingPresence(docId: string, peerId: string): Promise<void> {
+export async function stopAnnouncingPresence(docId: string, peerId: string, databasePaths?: DatabasePathsConfig): Promise<void> {
   try {
-    const peerRef = ref(rtdb, `${ROOMS_BASE}/${docId}/peers/${peerId}`)
+    const paths = buildDatabasePaths(databasePaths || { structure: 'flat', flat: { documents: '/documents', rooms: '/rooms', snapshots: '/snapshots', signaling: '/signaling' } }, docId)
+    const peerRef = ref(rtdb, `${paths.rooms}/peers/${peerId}`)
     await remove(peerRef)
     console.log(`Removed presence for peer ${peerId} from document ${docId}`)
   } catch (error) {

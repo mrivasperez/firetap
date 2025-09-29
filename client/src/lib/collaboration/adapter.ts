@@ -7,12 +7,15 @@ import { rtdb } from '../../firebase'
 import { ref, set, remove, onValue, push, off } from 'firebase/database'
 import { encodeAwarenessUpdate, applyAwarenessUpdate } from 'y-protocols/awareness'
 
+import { type DatabasePathsConfig, buildDatabasePaths } from './config'
+
 export type AdapterOptions = {
   docId: string
   peerId?: string
   user?: { name?: string; color?: string }
   syncIntervalMs?: number
   maxDirectPeers?: number
+  databasePaths?: DatabasePathsConfig
 }
 
 export type AdapterHandle = {
@@ -39,13 +42,12 @@ type SignalData = {
   timestamp: number
 }
 
-const SIGNALING_BASE = '/signaling'
-
 class SimplePeerManager {
   private docId: string
   private peerId: string
   private ydoc: Y.Doc
   private awareness: Awareness
+  private databasePaths: DatabasePathsConfig
   private peers = new Map<string, SimplePeer.Instance>()
   private signalingRef: ReturnType<typeof ref> | null = null
   private connectionStatus: 'connecting' | 'connected' | 'disconnected' = 'connecting'
@@ -56,29 +58,34 @@ class SimplePeerManager {
   private messageBuffer: Array<{ timestamp: number, size: number }> = []
   private maxBufferSize = 1000
   
-  constructor(docId: string, peerId: string, ydoc: Y.Doc, awareness: Awareness) {
+  constructor(docId: string, peerId: string, ydoc: Y.Doc, awareness: Awareness, databasePaths: DatabasePathsConfig) {
     this.docId = docId
     this.peerId = peerId
     this.ydoc = ydoc
     this.awareness = awareness
+    this.databasePaths = databasePaths
+  }
+
+  private getPaths() {
+    return buildDatabasePaths(this.databasePaths, this.docId)
   }
 
   async initialize(): Promise<void> {
     // Set up signaling listener
-    this.signalingRef = ref(rtdb, `${SIGNALING_BASE}/${this.docId}/${this.peerId}`)
+    this.signalingRef = ref(rtdb, `${this.getPaths().signaling}/${this.peerId}`)
     onValue(this.signalingRef, (snapshot) => {
       if (snapshot.exists()) {
         const signals = snapshot.val()
         Object.entries(signals).forEach(([key, signal]) => {
           this.handleSignalData(signal as SignalData)
           // Clean up processed signal
-          remove(ref(rtdb, `${SIGNALING_BASE}/${this.docId}/${this.peerId}/${key}`))
+          remove(ref(rtdb, `${this.getPaths().signaling}/${this.peerId}/${key}`))
         })
       }
     })
 
     // Listen for other peers joining
-    const peersRef = ref(rtdb, `/rooms/${this.docId}/peers`)
+    const peersRef = ref(rtdb, `${this.getPaths().rooms}/peers`)
     onValue(peersRef, (snapshot) => {
       if (snapshot.exists()) {
         const peers = snapshot.val()
@@ -185,7 +192,7 @@ class SimplePeerManager {
       timestamp: Date.now()
     }
     
-    const messageRef = push(ref(rtdb, `${SIGNALING_BASE}/${this.docId}/${targetPeerId}`))
+    const messageRef = push(ref(rtdb, `${this.getPaths().signaling}/${targetPeerId}`))
     await set(messageRef, signalData)
   }
 
@@ -338,7 +345,8 @@ export async function createFirebaseYWebrtcAdapter(opts: AdapterOptions): Promis
     docId, 
     peerId = crypto.randomUUID(), 
     user = {}, 
-    syncIntervalMs = 15_000
+    syncIntervalMs = 15_000,
+    databasePaths
   } = opts
 
   // 1) Create the Y.Doc and Awareness with memory optimizations
@@ -358,7 +366,7 @@ export async function createFirebaseYWebrtcAdapter(opts: AdapterOptions): Promis
 
   // 2) Load persisted state from Firebase (if any)
   try {
-    const loaded = await loadDocumentFromFirebase(docId)
+    const loaded = await loadDocumentFromFirebase(docId, databasePaths)
     if (loaded) {
       Y.applyUpdate(ydoc, loaded)
     }
@@ -375,7 +383,7 @@ export async function createFirebaseYWebrtcAdapter(opts: AdapterOptions): Promis
   }
 
   // 4) Create SimplePeer manager
-  const peerManager = new SimplePeerManager(docId, peerId, ydoc, awareness)
+  const peerManager = new SimplePeerManager(docId, peerId, ydoc, awareness, databasePaths || { structure: 'flat', flat: { documents: '/documents', rooms: '/rooms', snapshots: '/snapshots', signaling: '/signaling' } })
 
   // 5) Set up Y.js event handlers
   ydoc.on('update', (update: Uint8Array) => {
@@ -400,14 +408,14 @@ export async function createFirebaseYWebrtcAdapter(opts: AdapterOptions): Promis
   // 7) Announce presence in Firebase
   let presenceCleanup: (() => void) | null = null
   try {
-    await announcePresence(docId, peerInfo)
-    presenceCleanup = () => stopAnnouncingPresence(docId, peerId)
+    await announcePresence(docId, peerInfo, databasePaths)
+    presenceCleanup = () => stopAnnouncingPresence(docId, peerId, databasePaths)
   } catch (e) {
     console.warn('Failed to announce presence in Firebase:', e)
   }
 
   // 8) Start periodic persistence
-  const stopPersistence = startPeriodicPersistence(ydoc, docId, syncIntervalMs)
+  const stopPersistence = startPeriodicPersistence(ydoc, docId, syncIntervalMs, databasePaths)
 
   // 9) Initialize peer connections
   await peerManager.initialize()

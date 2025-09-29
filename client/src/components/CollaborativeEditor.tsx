@@ -12,6 +12,7 @@ type Props = {
   userName?: string
   userColor?: string
   className?: string
+  workspaceId?: string
 }
 
 export default function CollaborativeEditor({ 
@@ -19,6 +20,7 @@ export default function CollaborativeEditor({
   userName = 'Anonymous',
   userColor,
   className = ''
+  , workspaceId = 'workspace123'
 }: Props) {
   const [adapter, setAdapter] = useState<AdapterHandle | null>(null)
   const [isLoading, setIsLoading] = useState(true)
@@ -70,10 +72,22 @@ export default function CollaborativeEditor({
         console.log(`Initializing collaborative editor for document: ${docId}`)
         
         handle = await createFirebaseYWebrtcAdapter({ 
-          docId, 
+          docId,
           user: { name: userName, color: userColor },
           syncIntervalMs: 15000, // 15 second sync interval
-          maxDirectPeers: 6 // Reasonable cluster size
+          maxDirectPeers: 6, // Reasonable cluster size
+          databasePaths: {
+            structure: 'nested',
+            nested: {
+              basePath: `/${workspaceId}/documents`,
+              subPaths: {
+                documents: 'documents',
+                rooms: 'rooms',
+                snapshots: 'snapshots',
+                signaling: 'signaling'
+              }
+            }
+          }
         })
         
         setAdapter(handle)
@@ -111,7 +125,7 @@ export default function CollaborativeEditor({
         console.warn('Error during disconnect:', e)
       }
     }
-  }, [docId, userName, userColor])
+  }, [docId, userName, userColor, workspaceId])
 
   // Update editor when adapter changes
   useEffect(() => {

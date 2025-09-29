@@ -1,9 +1,7 @@
 import * as Y from 'yjs'
 import { rtdb } from '../../firebase'
 import { ref, set, get, serverTimestamp, runTransaction } from 'firebase/database'
-
-const DOCUMENTS_BASE = '/documents'
-const SNAPSHOTS_BASE = '/snapshots'
+import { buildDatabasePaths, type DatabasePathsConfig } from './config'
 
 export type DocumentSnapshot = {
   update: string
@@ -13,10 +11,12 @@ export type DocumentSnapshot = {
   checksum: string
 }
 
-export async function loadDocumentFromFirebase(docId: string): Promise<Uint8Array | null> {
+export async function loadDocumentFromFirebase(docId: string, databasePaths?: DatabasePathsConfig): Promise<Uint8Array | null> {
   try {
+    const paths = buildDatabasePaths(databasePaths || { structure: 'flat', flat: { documents: '/documents', rooms: '/rooms', snapshots: '/snapshots', signaling: '/signaling' } }, docId)
+    
     // Try to load the latest snapshot first
-    const snapshotRef = ref(rtdb, `${SNAPSHOTS_BASE}/${docId}/latest`)
+    const snapshotRef = ref(rtdb, `${paths.snapshots}/latest`)
     const snapshotSnap = await get(snapshotRef)
     
     if (snapshotSnap.exists()) {
@@ -27,7 +27,7 @@ export async function loadDocumentFromFirebase(docId: string): Promise<Uint8Arra
     }
 
     // Fallback to documents collection
-    const docRef = ref(rtdb, `${DOCUMENTS_BASE}/${docId}`)
+    const docRef = ref(rtdb, `${paths.documents}`)
     const docSnap = await get(docRef)
     
     if (!docSnap.exists()) return null
@@ -44,7 +44,7 @@ export async function loadDocumentFromFirebase(docId: string): Promise<Uint8Arra
   }
 }
 
-export function startPeriodicPersistence(ydoc: Y.Doc, docId: string, intervalMs = 60_000) {
+export function startPeriodicPersistence(ydoc: Y.Doc, docId: string, intervalMs = 60_000, databasePaths?: DatabasePathsConfig) {
   let persistenceCount = 0
   let lastPersistedState: string | null = null
   let debounceTimer: ReturnType<typeof setTimeout> | null = null
@@ -64,7 +64,7 @@ export function startPeriodicPersistence(ydoc: Y.Doc, docId: string, intervalMs 
         try {
           const currentState = uint8ArrayToBase64(Y.encodeStateAsUpdate(ydoc))
           if (currentState !== lastPersistedState) {
-            await persistDocument(ydoc, docId, persistenceCount++)
+            await persistDocument(ydoc, docId, persistenceCount++, databasePaths)
             lastPersistedState = currentState
             hasChanges = false
             console.log(`Document ${docId} persisted due to changes (version ${persistenceCount - 1})`)
@@ -85,7 +85,7 @@ export function startPeriodicPersistence(ydoc: Y.Doc, docId: string, intervalMs 
       if (hasChanges) {
         const currentState = uint8ArrayToBase64(Y.encodeStateAsUpdate(ydoc))
         if (currentState !== lastPersistedState) {
-          await persistDocument(ydoc, docId, persistenceCount++)
+          await persistDocument(ydoc, docId, persistenceCount++, databasePaths)
           lastPersistedState = currentState
           hasChanges = false
           console.log(`Document ${docId} persisted via periodic check (version ${persistenceCount - 1})`)
@@ -108,8 +108,10 @@ export function startPeriodicPersistence(ydoc: Y.Doc, docId: string, intervalMs 
   }
 }
 
-export async function persistDocument(ydoc: Y.Doc, docId: string, version?: number): Promise<void> {
+export async function persistDocument(ydoc: Y.Doc, docId: string, version?: number, databasePaths?: DatabasePathsConfig): Promise<void> {
   try {
+    const paths = buildDatabasePaths(databasePaths || { structure: 'flat', flat: { documents: '/documents', rooms: '/rooms', snapshots: '/snapshots', signaling: '/signaling' } }, docId)
+    
     const update = Y.encodeStateAsUpdate(ydoc)
     const stateVector = Y.encodeStateVector(ydoc)
     const base64Update = uint8ArrayToBase64(update)
@@ -125,7 +127,7 @@ export async function persistDocument(ydoc: Y.Doc, docId: string, version?: numb
     }
 
     // Use transaction to ensure atomic updates
-    await runTransaction(ref(rtdb, `${SNAPSHOTS_BASE}/${docId}`), (current) => {
+    await runTransaction(ref(rtdb, `${paths.snapshots}`), (current) => {
       const data = current || {}
       
       return {
@@ -136,7 +138,7 @@ export async function persistDocument(ydoc: Y.Doc, docId: string, version?: numb
     })
 
     // Also update the legacy documents collection for backward compatibility
-    await set(ref(rtdb, `${DOCUMENTS_BASE}/${docId}`), {
+    await set(ref(rtdb, `${paths.documents}`), {
       update: base64Update,
       updatedAt: serverTimestamp(),
       version: snapshot.version
@@ -152,7 +154,7 @@ export async function persistDocument(ydoc: Y.Doc, docId: string, version?: numb
 /**
  * Force immediate persistence if document has changes
  */
-export async function persistDocumentIfChanged(ydoc: Y.Doc, docId: string, lastKnownState?: string, version?: number): Promise<boolean> {
+export async function persistDocumentIfChanged(ydoc: Y.Doc, docId: string, lastKnownState?: string, version?: number, databasePaths?: DatabasePathsConfig): Promise<boolean> {
   try {
     const currentState = uint8ArrayToBase64(Y.encodeStateAsUpdate(ydoc))
     
@@ -162,7 +164,7 @@ export async function persistDocumentIfChanged(ydoc: Y.Doc, docId: string, lastK
       return false
     }
     
-    await persistDocument(ydoc, docId, version)
+    await persistDocument(ydoc, docId, version, databasePaths)
     console.log(`Document ${docId} persisted due to changes`)
     return true
   } catch (error) {
@@ -189,13 +191,15 @@ export function startSmartPersistence(
     debounceMs?: number
     maxIdleTimeMs?: number
     onPersist?: (docId: string, version: number) => void
+    databasePaths?: DatabasePathsConfig
   } = {}
 ) {
   const {
     intervalMs = 60_000, // 1 minute default
     debounceMs = 2_000,  // 2 second debounce
     maxIdleTimeMs = 300_000, // 5 minutes max idle
-    onPersist
+    onPersist,
+    databasePaths
   } = options
   
   let persistenceCount = 0
@@ -217,7 +221,7 @@ export function startSmartPersistence(
         try {
           const currentState = getDocumentStateHash(ydoc)
           if (currentState !== lastPersistedState) {
-            await persistDocument(ydoc, docId, persistenceCount++)
+            await persistDocument(ydoc, docId, persistenceCount++, databasePaths)
             lastPersistedState = currentState
             hasChanges = false
             onPersist?.(docId, persistenceCount - 1)
@@ -244,7 +248,7 @@ export function startSmartPersistence(
       if (hasChanges) {
         const currentState = getDocumentStateHash(ydoc)
         if (currentState !== lastPersistedState) {
-          await persistDocument(ydoc, docId, persistenceCount++)
+          await persistDocument(ydoc, docId, persistenceCount++, databasePaths)
           lastPersistedState = currentState
           hasChanges = false
           onPersist?.(docId, persistenceCount - 1)
@@ -266,8 +270,10 @@ export function startSmartPersistence(
   }
 }
 
-export async function createDocumentSnapshot(ydoc: Y.Doc, docId: string, label?: string): Promise<void> {
+export async function createDocumentSnapshot(ydoc: Y.Doc, docId: string, label?: string, databasePaths?: DatabasePathsConfig): Promise<void> {
   try {
+    const paths = buildDatabasePaths(databasePaths || { structure: 'flat', flat: { documents: '/documents', rooms: '/rooms', snapshots: '/snapshots', signaling: '/signaling' } }, docId)
+    
     const update = Y.encodeStateAsUpdate(ydoc)
     const stateVector = Y.encodeStateVector(ydoc)
     const base64Update = uint8ArrayToBase64(update)
@@ -285,7 +291,7 @@ export async function createDocumentSnapshot(ydoc: Y.Doc, docId: string, label?:
 
     const snapshotKey = label ? `${label}_${timestamp}` : `snapshot_${timestamp}`
     
-    await set(ref(rtdb, `${SNAPSHOTS_BASE}/${docId}/${snapshotKey}`), snapshot)
+    await set(ref(rtdb, `${paths.snapshots}/${snapshotKey}`), snapshot)
     
     console.log(`Created snapshot ${snapshotKey} for document ${docId}`)
   } catch (error) {
@@ -294,9 +300,11 @@ export async function createDocumentSnapshot(ydoc: Y.Doc, docId: string, label?:
   }
 }
 
-export async function loadDocumentSnapshot(docId: string, snapshotKey: string): Promise<Uint8Array | null> {
+export async function loadDocumentSnapshot(docId: string, snapshotKey: string, databasePaths?: DatabasePathsConfig): Promise<Uint8Array | null> {
   try {
-    const snapshotRef = ref(rtdb, `${SNAPSHOTS_BASE}/${docId}/${snapshotKey}`)
+    const paths = buildDatabasePaths(databasePaths || { structure: 'flat', flat: { documents: '/documents', rooms: '/rooms', snapshots: '/snapshots', signaling: '/signaling' } }, docId)
+    
+    const snapshotRef = ref(rtdb, `${paths.snapshots}/${snapshotKey}`)
     const snap = await get(snapshotRef)
     
     if (!snap.exists()) return null
@@ -309,9 +317,11 @@ export async function loadDocumentSnapshot(docId: string, snapshotKey: string): 
   }
 }
 
-export async function getDocumentVersion(docId: string): Promise<number | null> {
+export async function getDocumentVersion(docId: string, databasePaths?: DatabasePathsConfig): Promise<number | null> {
   try {
-    const snapshotRef = ref(rtdb, `${SNAPSHOTS_BASE}/${docId}/latest`)
+    const paths = buildDatabasePaths(databasePaths || { structure: 'flat', flat: { documents: '/documents', rooms: '/rooms', snapshots: '/snapshots', signaling: '/signaling' } }, docId)
+    
+    const snapshotRef = ref(rtdb, `${paths.snapshots}/latest`)
     const snap = await get(snapshotRef)
     
     if (!snap.exists()) return null
