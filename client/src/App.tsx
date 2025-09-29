@@ -1,7 +1,7 @@
 import { useState } from 'react'
 import './App.css'
 import CollaborativeEditor from './components/CollaborativeEditor'
-import { generateRandomColor } from './lib/collaboration/config'
+import { generateRandomColor } from './utils/color'
 
 const App = () => {
   const [userName] = useState(() => 

@@ -4,7 +4,7 @@ import StarterKit from '@tiptap/starter-kit'
 import Collaboration from '@tiptap/extension-collaboration'
 import CollaborationCaret from '@tiptap/extension-collaboration-caret'
 import { Placeholder } from '@tiptap/extensions'
-import createFirebaseYWebrtcAdapter, { type AdapterHandle } from '../lib/collaboration/adapter'
+import { createFirebaseYWebrtcAdapter, type AdapterHandle } from '../lib/collab-adapter'
 import './CollaborativeEditor.css'
 
 type Props = { 
