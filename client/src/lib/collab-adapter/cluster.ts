@@ -35,3 +35,43 @@ export async function stopAnnouncingPresence(rtdb: Database, docId: string, peer
     // Don't throw here as it's cleanup
   }
 }
+
+export async function cleanupStalePeers(rtdb: Database, docId: string, databasePaths?: DatabasePathsConfig): Promise<void> {
+  try {
+    const paths = buildDatabasePaths(databasePaths || { structure: 'flat', flat: { documents: '/documents', rooms: '/rooms', snapshots: '/snapshots', signaling: '/signaling' } }, docId)
+    const peersRef = ref(rtdb, `${paths.rooms}/peers`)
+    
+    // Get all current peers
+    const { get } = await import('firebase/database')
+    const snapshot = await get(peersRef)
+    
+    if (snapshot.exists()) {
+      const peers = snapshot.val()
+      const now = Date.now()
+      const staleThreshold = 120000 // 2 minutes
+      
+      const stalePromises: Promise<void>[] = []
+      
+      Object.entries(peers).forEach(([peerId, peerData]) => {
+        const peer = peerData as PeerInfo & { lastSeen?: number }
+        if (peer.lastSeen && (now - peer.lastSeen) > staleThreshold) {
+          console.log(`Removing stale peer: ${peerId} (last seen ${(now - peer.lastSeen) / 1000}s ago)`)
+          const stalePeerRef = ref(rtdb, `${paths.rooms}/peers/${peerId}`)
+          stalePromises.push(remove(stalePeerRef))
+          
+          // Also clean up any signaling data for this peer
+          const signalingRef = ref(rtdb, `${paths.signaling}/${peerId}`)
+          stalePromises.push(remove(signalingRef))
+        }
+      })
+      
+      await Promise.all(stalePromises)
+      
+      if (stalePromises.length > 0) {
+        console.log(`Cleaned up ${stalePromises.length / 2} stale peer entries`)
+      }
+    }
+  } catch (error) {
+    console.warn('Failed to cleanup stale peers:', error)
+  }
+}

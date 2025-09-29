@@ -2,7 +2,7 @@ import * as Y from 'yjs'
 import { Awareness } from 'y-protocols/awareness'
 import SimplePeer from 'simple-peer'
 import { startPeriodicPersistence, loadDocumentFromFirebase } from './persistence'
-import { announcePresence, stopAnnouncingPresence, type PeerInfo } from './cluster'
+import { announcePresence, stopAnnouncingPresence, cleanupStalePeers, type PeerInfo } from './cluster'
 import type { Database } from 'firebase/database'
 import { ref, set, remove, onValue, push, off } from 'firebase/database'
 import { encodeAwarenessUpdate, applyAwarenessUpdate } from 'y-protocols/awareness'
@@ -66,6 +66,11 @@ class SimplePeerManager {
   private databasePaths: DatabasePathsConfig
   private rtdb: Database
   private eventListeners: Map<keyof AdapterEvents, Set<(data: AdapterEvents[keyof AdapterEvents]) => void>> = new Map()
+  private cleanupInterval: NodeJS.Timeout | null = null
+  private heartbeatInterval: NodeJS.Timeout | null = null
+  private beforeUnloadHandler: (() => void) | null = null
+  private connectionTimestamps = new Map<string, number>()
+  private isDestroyed = false
 
   // Event system methods
   emit<K extends keyof AdapterEvents>(event: K, data: AdapterEvents[K]): void {
@@ -112,17 +117,18 @@ class SimplePeerManager {
   private peersRef: ReturnType<typeof ref> | null = null
   private memoryStats = { messageBuffer: 0, connectionCount: 0, lastCleanup: Date.now(), awarenessStates: 0 }
 
-  private maxPeers = 8 // Prevent too many connections
+  private maxPeers: number // Prevent too many connections
   private messageBuffer: Array<{ timestamp: number, size: number }> = []
   private maxBufferSize = 1000
   
-  constructor(docId: string, peerId: string, ydoc: Y.Doc, awareness: Awareness, rtdb: Database, databasePaths: DatabasePathsConfig) {
+  constructor(docId: string, peerId: string, ydoc: Y.Doc, awareness: Awareness, rtdb: Database, databasePaths: DatabasePathsConfig, maxDirectPeers: number = 20) {
     this.docId = docId
     this.peerId = peerId
     this.ydoc = ydoc
     this.awareness = awareness
     this.rtdb = rtdb
     this.databasePaths = databasePaths
+    this.maxPeers = maxDirectPeers
   }
 
   private getPaths() {
@@ -130,10 +136,14 @@ class SimplePeerManager {
   }
 
   async initialize(): Promise<void> {
+    if (this.isDestroyed) {
+      throw new Error('Cannot initialize destroyed peer manager')
+    }
+
     // Set up signaling listener
     this.signalingRef = ref(this.rtdb, `${this.getPaths().signaling}/${this.peerId}`)
     onValue(this.signalingRef, (snapshot) => {
-      if (snapshot.exists()) {
+      if (snapshot.exists() && !this.isDestroyed) {
         const signals = snapshot.val()
         Object.entries(signals).forEach(([key, signal]) => {
           this.handleSignalData(signal as SignalData)
@@ -144,23 +154,47 @@ class SimplePeerManager {
     })
 
     // Listen for other peers joining
-    const peersRef = ref(this.rtdb, `${this.getPaths().rooms}/peers`)
-    onValue(peersRef, (snapshot) => {
-      if (snapshot.exists()) {
+    this.peersRef = ref(this.rtdb, `${this.getPaths().rooms}/peers`)
+    onValue(this.peersRef, (snapshot) => {
+      if (snapshot.exists() && !this.isDestroyed) {
         const peers = snapshot.val()
         const currentPeerIds = Object.keys(peers)
+        const now = Date.now()
         
         currentPeerIds.forEach(otherPeerId => {
           if (otherPeerId !== this.peerId && !this.peers.has(otherPeerId)) {
-            // Only create connection if we should be the initiator (deterministic)
-            const shouldInitiate = this.peerId < otherPeerId
-            if (shouldInitiate) {
-              this.createPeerConnection(otherPeerId, true)
+            const peerData = peers[otherPeerId]
+            // Check if peer is not stale (connected within last 30 seconds)
+            if (peerData.lastSeen && (now - peerData.lastSeen) < 30000) {
+              // Only create connection if we should be the initiator (deterministic)
+              const shouldInitiate = this.peerId < otherPeerId
+              if (shouldInitiate) {
+                this.createPeerConnection(otherPeerId, true)
+              }
             }
+          }
+        })
+        
+        // Clean up our own connections to peers that are no longer present
+        this.peers.forEach((peer, peerId) => {
+          if (!currentPeerIds.includes(peerId)) {
+            console.log(`Removing connection to peer ${peerId} (no longer in presence)`)
+            peer.destroy()
+            this.peers.delete(peerId)
+            this.connectionTimestamps.delete(peerId)
           }
         })
       }
     })
+
+    // Set up periodic cleanup
+    this.startPeriodicCleanup()
+    
+    // Set up heartbeat to maintain presence
+    this.startHeartbeat()
+    
+    // Set up beforeunload handler
+    this.setupBeforeUnloadHandler()
 
     this.connectionStatus = 'connected'
   }
@@ -168,6 +202,11 @@ class SimplePeerManager {
   private createPeerConnection(otherPeerId: string, initiator: boolean): void {
     // Check if peer connection already exists
     if (this.peers.has(otherPeerId)) {
+      return
+    }
+    
+    // Check if we're destroyed
+    if (this.isDestroyed) {
       return
     }
     
@@ -194,6 +233,10 @@ class SimplePeerManager {
     })
 
     peer.on('connect', () => {
+      console.log(`Peer ${otherPeerId} connected`)
+      this.connectionTimestamps.set(otherPeerId, Date.now())
+      this.emit('peer-joined', { peerId: otherPeerId, user: { id: otherPeerId, name: `User-${otherPeerId.slice(0, 6)}`, color: '#000000', connectedAt: Date.now() } })
+      
       // Send current document state
       const update = Y.encodeStateAsUpdate(this.ydoc)
       peer.send(JSON.stringify({ type: 'sync', update: Array.from(update) }))
@@ -223,11 +266,12 @@ class SimplePeerManager {
 
     peer.on('error', (error) => {
       console.error(`Peer connection error with ${otherPeerId}:`, error)
-      this.peers.delete(otherPeerId)
+      this.cleanupPeerConnection(otherPeerId)
     })
 
     peer.on('close', () => {
-      this.peers.delete(otherPeerId)
+      console.log(`Peer ${otherPeerId} disconnected`)
+      this.cleanupPeerConnection(otherPeerId)
     })
 
     this.peers.set(otherPeerId, peer)
@@ -358,6 +402,106 @@ class SimplePeerManager {
     }
   }
 
+  private cleanupPeerConnection(peerId: string): void {
+    const peer = this.peers.get(peerId)
+    if (peer) {
+      try {
+        peer.destroy()
+      } catch (e) {
+        console.warn(`Error destroying peer ${peerId}:`, e)
+      }
+      this.peers.delete(peerId)
+    }
+    this.connectionTimestamps.delete(peerId)
+    this.emit('peer-left', { peerId })
+  }
+
+  private startPeriodicCleanup(): void {
+    if (this.cleanupInterval) {
+      clearInterval(this.cleanupInterval)
+    }
+    this.cleanupInterval = setInterval(async () => {
+      if (this.isDestroyed) return
+      
+      const now = Date.now()
+      const staleTimeout = 60000 // 1 minute
+      
+      // Clean up stale connections
+      this.connectionTimestamps.forEach((timestamp, peerId) => {
+        if (now - timestamp > staleTimeout) {
+          console.log(`Cleaning up stale connection to peer ${peerId}`)
+          this.cleanupPeerConnection(peerId)
+        }
+      })
+      
+      // Clean up stale peers from Firebase
+      try {
+        await cleanupStalePeers(this.rtdb, this.docId, this.databasePaths)
+      } catch (error) {
+        console.warn('Failed to cleanup stale peers from Firebase:', error)
+      }
+      
+      // Perform general memory cleanup
+      this.performMemoryCleanup()
+    }, 30000) // Run every 30 seconds
+  }
+
+  private startHeartbeat(): void {
+    if (this.heartbeatInterval) {
+      clearInterval(this.heartbeatInterval)
+    }
+    this.heartbeatInterval = setInterval(async () => {
+      if (this.isDestroyed) return
+      
+      try {
+        // Update our lastSeen timestamp in Firebase
+        const paths = this.getPaths()
+        const peerRef = ref(this.rtdb, `${paths.rooms}/peers/${this.peerId}`)
+        const currentData = {
+          id: this.peerId,
+          name: `User-${this.peerId.slice(0, 6)}`,
+          color: '#' + Math.floor(Math.random() * 16777215).toString(16).padStart(6, '0'),
+          connectedAt: Date.now(),
+          lastSeen: Date.now()
+        }
+        await set(peerRef, currentData)
+      } catch (error) {
+        console.warn('Failed to update heartbeat:', error)
+      }
+    }, 15000) // Every 15 seconds
+  }
+
+  private setupBeforeUnloadHandler(): void {
+    this.beforeUnloadHandler = () => {
+      // Synchronously clean up our presence
+      try {
+        const paths = this.getPaths()
+        const peerRef = ref(this.rtdb, `${paths.rooms}/peers/${this.peerId}`)
+        // Use sendBeacon for reliable cleanup on page unload
+        if (navigator.sendBeacon) {
+          const cleanupData = JSON.stringify({ action: 'cleanup', peerId: this.peerId })
+          navigator.sendBeacon('/cleanup', cleanupData) // This would need server support
+        }
+        // Fallback: direct Firebase cleanup (may not complete)
+        remove(peerRef)
+      } catch (error) {
+        console.warn('Error in beforeunload cleanup:', error)
+      }
+    }
+    
+    if (typeof window !== 'undefined') {
+      window.addEventListener('beforeunload', this.beforeUnloadHandler)
+      // Also handle page hide (mobile Safari, etc.)
+      window.addEventListener('pagehide', this.beforeUnloadHandler)
+      // Handle tab visibility changes
+      window.addEventListener('visibilitychange', () => {
+        if (document.hidden && this.beforeUnloadHandler) {
+          this.beforeUnloadHandler()
+        }
+      })
+    }
+  }
+
   destroy(): void {
     // Perform final cleanup
     this.performMemoryCleanup()
@@ -396,6 +540,7 @@ export async function createFirebaseYWebrtcAdapter(opts: AdapterOptions): Promis
     peerId = crypto.randomUUID(), 
     user = {}, 
     syncIntervalMs = 15_000,
+    maxDirectPeers = 20,
     databasePaths
   } = opts
 
@@ -433,7 +578,7 @@ export async function createFirebaseYWebrtcAdapter(opts: AdapterOptions): Promis
   }
 
   // 4) Create SimplePeer manager
-  const peerManager = new SimplePeerManager(docId, peerId, ydoc, awareness, firebaseDatabase, databasePaths || { structure: 'flat', flat: { documents: '/documents', rooms: '/rooms', snapshots: '/snapshots', signaling: '/signaling' } })
+  const peerManager = new SimplePeerManager(docId, peerId, ydoc, awareness, firebaseDatabase, databasePaths || { structure: 'flat', flat: { documents: '/documents', rooms: '/rooms', snapshots: '/snapshots', signaling: '/signaling' } }, maxDirectPeers)
 
   // 5) Set up Y.js event handlers
   ydoc.on('update', (update: Uint8Array) => {
