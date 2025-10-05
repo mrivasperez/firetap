@@ -30,12 +30,15 @@
   "scripts": {
     "build": "tsc",
     "prepublishOnly": "npm run build",
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:ui": "vitest --ui",
+    "test:coverage": "vitest run --coverage"
   },
   "peerDependencies": {
     "firebase": "^12.0.0",
-    "yjs": "^13.0.0",
-    "y-protocols": "^1.0.0"
+    "y-protocols": "^1.0.0",
+    "yjs": "^13.0.0"
   },
   "dependencies": {
     "lib0": "^0.2.114",
@@ -43,10 +46,14 @@
     "uuid": "^13.0.0"
   },
   "devDependencies": {
+    "@testing-library/dom": "^10.4.1",
     "@types/simple-peer": "^9.11.8",
     "@types/uuid": "^10.0.0",
+    "@vitest/ui": "^3.2.4",
     "firebase": "^12.3.0",
+    "happy-dom": "^19.0.2",
     "typescript": "~5.8.3",
+    "vitest": "^3.2.4",
     "y-protocols": "^1.0.0",
     "yjs": "^13.6.27"
   }

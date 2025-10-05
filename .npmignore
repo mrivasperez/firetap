@@ -12,6 +12,9 @@ firebase-project/
 **/*.spec.ts
 __tests__/
 coverage/
+vitest.config.ts
+vitest.setup.ts
+TESTING.md
 
 # Build artifacts
 *.tsbuildinfo
@@ -24,6 +27,7 @@ node_modules/
 vite.config.*
 tsconfig.app.json
 tsconfig.node.json
+jest.config.js
 
 # Git files
 .git/
