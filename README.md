@@ -25,41 +25,41 @@ npm install firetap yjs firebase y-protocols
 ```typescript
 import { createFirebaseYWebrtcAdapter } from 'firetap'
 import { initializeApp } from 'firebase/app'
-import * as Y from 'yjs'
+import { getDatabase } from 'firebase/database'
 
 // Initialize Firebase
 const firebaseApp = initializeApp({
   databaseURL: 'https://your-project.firebaseio.com'
 })
-
-// Create a Yjs document
-const ydoc = new Y.Doc()
+const firebaseDatabase = getDatabase(firebaseApp)
 
 // Create the adapter
 const adapter = await createFirebaseYWebrtcAdapter({
-  firebaseApp,
-  ydoc,
-  documentId: 'my-document',
-  workspaceId: 'my-workspace',
-  userId: 'user-123',
-  userName: 'John Doe'
+  docId: 'my-document',
+  firebaseDatabase,
+  user: {
+    name: 'John Doe',
+    color: '#ff0000'
+  }
 })
 
 // Use with TipTap
 import { useEditor } from '@tiptap/react'
+import StarterKit from '@tiptap/starter-kit'
 import Collaboration from '@tiptap/extension-collaboration'
-import CollaborationCursor from '@tiptap/extension-collaboration-cursor'
+import CollaborationCaret from '@tiptap/extension-collaboration-caret'
 
 const editor = useEditor({
   extensions: [
     StarterKit.configure({
-      history: false, // Disable local history
+      // Disable undoRedo when using collaboration
+      undoRedo: false,
     }),
     Collaboration.configure({
-      document: ydoc,
+      document: adapter.ydoc,
     }),
-    CollaborationCursor.configure({
-      provider: adapter.awareness,
+    CollaborationCaret.configure({
+      provider: { awareness: adapter.awareness },
       user: {
         name: 'John Doe',
         color: '#ff0000',
@@ -74,50 +74,52 @@ adapter.disconnect()
 
 ## Configuration
 
-### Simple Configuration
-
-For basic use cases:
+### Basic Configuration
 
 ```typescript
-import { createSimpleConfig } from 'firetap'
-
-const config = createSimpleConfig({
-  workspaceId: 'my-workspace',
-  documentId: 'my-document',
-  userId: 'user-123',
-  userName: 'John Doe'
-})
+import { createFirebaseYWebrtcAdapter } from 'firetap'
+import { getDatabase } from 'firebase/database'
 
 const adapter = await createFirebaseYWebrtcAdapter({
-  firebaseApp,
-  ydoc,
-  ...config
+  docId: 'my-document',
+  firebaseDatabase: getDatabase(firebaseApp),
+  user: {
+    name: 'John Doe',
+    color: '#ff0000'
+  }
 })
 ```
 
 ### Advanced Configuration
 
-For custom database paths and behavior:
+For custom database paths, sync intervals, and peer limits:
 
 ```typescript
-import { createAdapterConfig, buildDatabasePaths } from 'firetap'
+import { createFirebaseYWebrtcAdapter } from 'firetap'
+import { getDatabase } from 'firebase/database'
 
-const paths = buildDatabasePaths({
-  workspaceId: 'my-workspace',
-  documentId: 'my-document',
-  customPrefix: 'collab' // Default is 'collaboration'
-})
-
-const config = createAdapterConfig({
-  documentId: 'my-document',
-  workspaceId: 'my-workspace',
-  userId: 'user-123',
-  userName: 'John Doe',
-  userColor: '#ff0000',
-  databasePaths: paths,
-  persistenceInterval: 5000, // Save every 5 seconds
-  cleanupInterval: 30000, // Cleanup every 30 seconds
-  awarenessUpdateInterval: 1000 // Update presence every second
+const adapter = await createFirebaseYWebrtcAdapter({
+  docId: 'my-document',
+  firebaseDatabase: getDatabase(firebaseApp),
+  peerId: 'custom-peer-id', // Optional: custom peer identifier
+  user: {
+    name: 'John Doe',
+    color: '#ff0000'
+  },
+  syncIntervalMs: 15000, // Sync to Firebase every 15 seconds
+  maxDirectPeers: 6, // Maximum WebRTC connections
+  databasePaths: {
+    structure: 'nested',
+    nested: {
+      basePath: '/my-workspace/documents',
+      subPaths: {
+        documents: 'documents',
+        rooms: 'rooms',
+        snapshots: 'snapshots',
+        signaling: 'signaling'
+      }
+    }
+  }
 })
 ```
 
@@ -128,26 +130,27 @@ const config = createAdapterConfig({
 Creates and initializes a new adapter instance.
 
 **Options:**
-- `firebaseApp` (required): Firebase app instance
-- `ydoc` (required): Yjs document instance
-- `documentId` (required): Unique identifier for the document
-- `workspaceId` (required): Workspace/room identifier
-- `userId` (required): Current user's unique identifier
-- `userName` (required): Display name for the user
-- `userColor` (optional): Color for user's cursor/presence
-- `databasePaths` (optional): Custom Firebase database paths
-- `persistenceInterval` (optional): How often to persist (default: 3000ms)
-- `cleanupInterval` (optional): How often to cleanup (default: 60000ms)
-- `awarenessUpdateInterval` (optional): Awareness update frequency (default: 500ms)
+- `docId` (required): Unique identifier for the document
+- `firebaseDatabase` (required): Firebase Realtime Database instance
+- `peerId` (optional): Custom peer identifier (auto-generated if not provided)
+- `user` (optional): User information object
+  - `name` (optional): Display name for the user (default: "User-{id}")
+  - `color` (optional): Color for user's cursor/presence (auto-generated if not provided)
+- `syncIntervalMs` (optional): How often to persist to Firebase (default: 30000ms)
+- `maxDirectPeers` (optional): Maximum WebRTC peer connections (default: 10)
+- `databasePaths` (optional): Custom Firebase database path structure
+  - `structure`: Either `'flat'` or `'nested'`
+  - For flat structure: specify custom paths for documents, rooms, snapshots, signaling
+  - For nested structure: specify basePath and subPaths
 
-**Returns:** `Promise<YDocumentAdapter>`
+**Returns:** `Promise<AdapterHandle>`
 
-### `YDocumentAdapter`
+### `AdapterHandle`
 
 The adapter instance with the following interface:
 
 ```typescript
-interface YDocumentAdapter {
+interface AdapterHandle {
   // Core properties
   ydoc: Y.Doc
   awareness: Awareness
@@ -159,7 +162,7 @@ interface YDocumentAdapter {
   
   // Peer information
   getPeerCount(): number
-  getUserInfo(): PeerInfo
+  getUserInfo(): UserInfo
   
   // Memory management
   getMemoryStats(): MemoryStats
@@ -197,29 +200,92 @@ adapter.on('error', ({ error, context }) => {
 })
 ```
 
-## Persistence Utilities
+## React Integration Example
 
-For advanced use cases, you can manually control persistence:
+Here's a complete example of using Firetap with React and TipTap:
 
 ```typescript
-import { 
-  loadDocumentFromFirebase,
-  persistDocument,
-  createDocumentSnapshot,
-  getDocumentVersion
-} from 'firetap'
+import { useEffect, useState } from 'react'
+import { EditorContent, useEditor } from '@tiptap/react'
+import StarterKit from '@tiptap/starter-kit'
+import Collaboration from '@tiptap/extension-collaboration'
+import CollaborationCaret from '@tiptap/extension-collaboration-caret'
+import { createFirebaseYWebrtcAdapter, type AdapterHandle } from 'firetap'
+import { getDatabase } from 'firebase/database'
 
-// Load a document manually
-await loadDocumentFromFirebase(firebaseApp, ydoc, documentId, workspaceId)
+export default function CollaborativeEditor({ 
+  docId = 'demo-doc',
+  userName = 'Anonymous',
+  userColor = '#ff0000'
+}) {
+  const [adapter, setAdapter] = useState<AdapterHandle | null>(null)
+  const [isLoading, setIsLoading] = useState(true)
 
-// Persist a document manually
-await persistDocument(firebaseApp, ydoc, documentId, workspaceId)
+  const editor = useEditor({
+    extensions: [
+      StarterKit.configure({
+        // Disable undoRedo when using collaboration
+        undoRedo: adapter ? false : {},
+      }),
+      // Only add collaboration extensions when adapter is ready
+      ...(adapter ? [
+        Collaboration.configure({
+          document: adapter.ydoc,
+        }),
+        CollaborationCaret.configure({
+          provider: { awareness: adapter.awareness },
+          user: {
+            name: userName,
+            color: userColor,
+          },
+        }),
+      ] : []),
+    ],
+    editable: !!adapter,
+  }, [adapter, userName, userColor])
 
-// Create a snapshot
-const snapshot = await createDocumentSnapshot(ydoc)
+  useEffect(() => {
+    let handle: AdapterHandle | null = null
+    
+    ;(async () => {
+      try {
+        setIsLoading(true)
+        
+        handle = await createFirebaseYWebrtcAdapter({ 
+          docId,
+          firebaseDatabase: getDatabase(),
+          user: { name: userName, color: userColor },
+          syncIntervalMs: 15000,
+          maxDirectPeers: 6,
+        })
+        
+        setAdapter(handle)
+        setIsLoading(false)
+      } catch (err) {
+        console.error('Failed to initialize editor:', err)
+        setIsLoading(false)
+      }
+    })()
 
-// Get current version
-const version = await getDocumentVersion(firebaseApp, documentId, workspaceId)
+    return () => {
+      handle?.disconnect()
+    }
+  }, [docId, userName, userColor])
+
+  if (isLoading) {
+    return <div>Loading collaborative editor...</div>
+  }
+
+  return (
+    <div>
+      <div className="editor-header">
+        <span>👥 {adapter?.getPeerCount() || 0} peers</span>
+        <span>{adapter?.getConnectionStatus()}</span>
+      </div>
+      <EditorContent editor={editor} />
+    </div>
+  )
+}
 ```
 
 ## How It Works

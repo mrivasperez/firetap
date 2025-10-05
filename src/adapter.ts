@@ -1,6 +1,6 @@
 import * as Y from "yjs";
 import { Awareness } from "y-protocols/awareness";
-import * as SimplePeer from "simple-peer";
+import SimplePeer from "simple-peer";
 import {
   startPeriodicPersistence,
   loadDocumentFromFirebase,
@@ -43,8 +43,8 @@ const MAX_AWARENESS_STATES = 50; // Maximum number of awareness states before cl
 
 // Cleanup & Heartbeat Intervals
 const CLEANUP_INTERVAL_MS = 60_000; // 60 seconds - interval for periodic cleanup
-const HEARTBEAT_INTERVAL_MS = 60_000; // 60 seconds - interval for presence heartbeat (reduced Firebase writes)
-const STALE_CONNECTION_TIMEOUT_MS = 180_000; // 3 minutes - timeout for stale connections (increased proportionally)
+const HEARTBEAT_INTERVAL_MS = 60_000; // 60 seconds - interval for presence heartbeat
+const STALE_CONNECTION_TIMEOUT_MS = 180_000; // 3 minutes - timeout for stale connections
 const MEMORY_CHECK_INTERVAL_MS = 300_000; // 5 minutes - interval for memory monitoring
 
 // Default Configuration
@@ -325,7 +325,7 @@ class SimplePeerManager {
       },
     });
 
-    peer.on("signal", (data) => {
+    peer.on("signal", (data: SimplePeer.SignalData) => {
       // Send signal through Firebase
       this.sendSignal(otherPeerId, data);
     });
@@ -347,7 +347,7 @@ class SimplePeerManager {
       peer.send(JSON.stringify({ type: "sync", update: Array.from(update) }));
     });
 
-    peer.on("data", (data) => {
+    peer.on("data", (data: Uint8Array) => {
       try {
         const message = JSON.parse(data.toString());
         const messageSize = data.length;
@@ -370,7 +370,7 @@ class SimplePeerManager {
       }
     });
 
-    peer.on("error", (error) => {
+    peer.on("error", (error: Error) => {
       console.error(`Peer connection error with ${otherPeerId}:`, error);
       this.cleanupPeerConnection(otherPeerId);
     });
