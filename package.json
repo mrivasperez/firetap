@@ -12,9 +12,42 @@
   },
   "license": "ISC",
   "author": "",
-  "type": "commonjs",
-  "main": "index.js",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "index.ts",
+    "src",
+    "README.md"
+  ],
   "scripts": {
+    "build": "tsc",
+    "prepublishOnly": "npm run build",
     "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "peerDependencies": {
+    "firebase": "^12.0.0",
+    "yjs": "^13.0.0",
+    "y-protocols": "^1.0.0"
+  },
+  "dependencies": {
+    "lib0": "^0.2.114",
+    "simple-peer": "^9.11.1",
+    "uuid": "^13.0.0"
+  },
+  "devDependencies": {
+    "@types/simple-peer": "^9.11.8",
+    "@types/uuid": "^10.0.0",
+    "firebase": "^12.3.0",
+    "typescript": "~5.8.3",
+    "y-protocols": "^1.0.0",
+    "yjs": "^13.6.27"
   }
 }

@@ -1,0 +1,55 @@
+# Source files (TypeScript will be included via 'files' in package.json)
+# We want to include src/ and index.ts for source maps
+
+# Development and prototype files
+client/
+firebase-project/
+.vscode/
+.idea/
+
+# Test files
+**/*.test.ts
+**/*.spec.ts
+__tests__/
+coverage/
+
+# Build artifacts
+*.tsbuildinfo
+.tmp/
+node_modules/
+
+# Development configs
+.eslintrc*
+.prettierrc*
+vite.config.*
+tsconfig.app.json
+tsconfig.node.json
+
+# Git files
+.git/
+.gitignore
+.gitattributes
+
+# CI/CD
+.github/
+.gitlab-ci.yml
+.travis.yml
+
+# Documentation (except README.md which is in 'files')
+docs/
+*.md
+!README.md
+
+# Environment files
+.env*
+!.env.example
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
