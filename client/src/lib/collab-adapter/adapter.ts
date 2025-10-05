@@ -15,7 +15,7 @@ import { type DatabasePathsConfig, buildDatabasePaths, type ConnectionState } fr
 
 // Peer Connection Configuration
 const DEFAULT_MAX_DIRECT_PEERS = 20 // Maximum number of WebRTC peer connections
-const PEER_PRESENCE_TIMEOUT_MS = 30_000 // 30 seconds - consider peer stale if not seen
+const PEER_PRESENCE_TIMEOUT_MS = 120_000 // 120 seconds - consider peer stale if not seen (2x heartbeat)
 const PEER_ID_DISPLAY_LENGTH = 6 // Number of characters to show in peer ID
 
 // Memory Management
@@ -26,9 +26,9 @@ const MAX_MEMORY_BUFFER_BYTES = 10 * 1024 * 1024 // 10MB - max message buffer si
 const MAX_AWARENESS_STATES = 50 // Maximum number of awareness states before cleanup
 
 // Cleanup & Heartbeat Intervals
-const CLEANUP_INTERVAL_MS = 30_000 // 30 seconds - interval for periodic cleanup
-const HEARTBEAT_INTERVAL_MS = 15_000 // 15 seconds - interval for presence heartbeat
-const STALE_CONNECTION_TIMEOUT_MS = 60_000 // 1 minute - timeout for stale connections
+const CLEANUP_INTERVAL_MS = 60_000 // 60 seconds - interval for periodic cleanup
+const HEARTBEAT_INTERVAL_MS = 60_000 // 60 seconds - interval for presence heartbeat (reduced Firebase writes)
+const STALE_CONNECTION_TIMEOUT_MS = 180_000 // 3 minutes - timeout for stale connections (increased proportionally)
 const MEMORY_CHECK_INTERVAL_MS = 300_000 // 5 minutes - interval for memory monitoring
 
 // Default Configuration
@@ -503,6 +503,11 @@ class SimplePeerManager {
         // Update our lastSeen timestamp in Firebase
         const paths = this.getPaths()
         const peerRef = ref(this.rtdb, `${paths.rooms}/peers/${this.peerId}`)
+        
+        // Set up automatic cleanup on disconnect (Firebase handles this)
+        const { onDisconnect } = await import('firebase/database')
+        await onDisconnect(peerRef).remove()
+        
         const currentData = {
           id: this.peerId,
           name: `User-${this.peerId.slice(0, PEER_ID_DISPLAY_LENGTH)}`,
@@ -513,7 +518,7 @@ class SimplePeerManager {
       } catch (error) {
         console.warn('Failed to update heartbeat:', error)
       }
-    }, HEARTBEAT_INTERVAL_MS) // Every 15 seconds
+    }, HEARTBEAT_INTERVAL_MS) // Every 60 seconds (reduced from 15s for cost optimization)
   }
 
   private setupBeforeUnloadHandler(): void {

@@ -7,7 +7,7 @@ import { buildDatabasePaths, type DatabasePathsConfig } from './config'
 // ============================================================================
 
 // Peer Presence Configuration
-const STALE_PEER_THRESHOLD_MS = 120_000 // 2 minutes - consider peer stale after this time
+const STALE_PEER_THRESHOLD_MS = 180_000 // 3 minutes - consider peer stale after this time (increased with heartbeat optimization)
 const MILLISECONDS_TO_SECONDS = 1_000 // Conversion factor for time display
 
 export type PeerInfo = {
@@ -20,6 +20,11 @@ export async function announcePresence(rtdb: Database, docId: string, peer: Peer
   try {
     const paths = buildDatabasePaths(databasePaths || { structure: 'flat', flat: { documents: '/documents', rooms: '/rooms', snapshots: '/snapshots', signaling: '/signaling' } }, docId)
     const peerRef = ref(rtdb, `${paths.rooms}/peers/${peer.id}`)
+    
+    // Set up automatic cleanup on disconnect (cost optimization)
+    const { onDisconnect } = await import('firebase/database')
+    await onDisconnect(peerRef).remove()
+    
     // Add current timestamp for presence cleanup
     const peerWithTimestamp = {
       ...peer,

@@ -82,8 +82,8 @@ export const DEFAULT_CONFIG: CollaborationConfig = {
   },
   maxDirectPeers: 4,
   syncIntervalMs: 60000,
-  connectionTimeout: 15000,
-  heartbeatInterval: 30000,
+  connectionTimeout: 30000, // Increased from 15s to 30s to match heartbeat optimization
+  heartbeatInterval: 60000, // Increased from 30s to 60s for cost optimization (75% write reduction)
   placeholder: "Start typing to collaborate...",
   showConnectionStatus: true,
   showPeerCount: true,
