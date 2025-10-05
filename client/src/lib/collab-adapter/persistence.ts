@@ -1,6 +1,6 @@
 import * as Y from 'yjs'
 import type { Database } from 'firebase/database'
-import { ref, set, get, serverTimestamp, runTransaction } from 'firebase/database'
+import { ref, set, get, serverTimestamp } from 'firebase/database'
 import { buildDatabasePaths, type DatabasePathsConfig } from './config'
 
 // ============================================================================
@@ -36,7 +36,9 @@ export async function loadDocumentFromFirebase(rtdb: Database, docId: string, da
       return binary
     }
 
-    // Fallback to documents collection
+    // BACKWARD COMPATIBILITY: Fallback to legacy /documents collection
+    // Only used for loading old documents created before optimization
+    // New documents are saved only to /snapshots/latest
     const docRef = ref(rtdb, `${paths.documents}`)
     const docSnap = await get(docRef)
     
@@ -133,23 +135,14 @@ export async function persistDocument(rtdb: Database, ydoc: Y.Doc, docId: string
       checksum
     }
 
-    // Use transaction to ensure atomic updates
-    await runTransaction(ref(rtdb, `${paths.snapshots}`), (current) => {
-      const data = current || {}
-      
-      return {
-        ...data,
-        latest: snapshot,
-        [`version_${snapshot.version}`]: snapshot
-      }
-    })
+    // OPTIMIZED: Only write to /snapshots/latest (removed duplicate /documents write)
+    // This reduces Firebase write operations by 50% for persistence
+    // Note: loadDocumentFromFirebase still has /documents fallback for backward compatibility
+    await set(ref(rtdb, `${paths.snapshots}/latest`), snapshot)
 
-    // Also update the legacy documents collection for backward compatibility
-    await set(ref(rtdb, `${paths.documents}`), {
-      update: base64Update,
-      updatedAt: serverTimestamp(),
-      version: snapshot.version
-    })
+    // REMOVED: Duplicate write to /documents collection
+    // Old code (removed for cost optimization):
+    // await set(ref(rtdb, `${paths.documents}`), { ... })
 
   } catch (error) {
     console.error('Failed to persist document:', error)
