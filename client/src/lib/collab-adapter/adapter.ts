@@ -100,8 +100,10 @@ class SimplePeerManager {
   private cleanupInterval: NodeJS.Timeout | null = null
   private heartbeatInterval: NodeJS.Timeout | null = null
   private beforeUnloadHandler: (() => void) | null = null
+  private visibilityChangeHandler: (() => void) | null = null
   private connectionTimestamps = new Map<string, number>()
   private isDestroyed = false
+  private isTabVisible = true
 
   // Event system methods
   emit<K extends keyof AdapterEvents>(event: K, data: AdapterEvents[K]): void {
@@ -523,7 +525,7 @@ class SimplePeerManager {
 
   private setupBeforeUnloadHandler(): void {
     this.beforeUnloadHandler = () => {
-      // Synchronously clean up our presence
+      // Synchronously clean up our presence on actual page unload
       try {
         const paths = this.getPaths()
         const peerRef = ref(this.rtdb, `${paths.rooms}/peers/${this.peerId}`)
@@ -539,20 +541,95 @@ class SimplePeerManager {
       }
     }
     
+    // Handle tab visibility changes (different from page unload)
+    this.visibilityChangeHandler = async () => {
+      if (typeof document === 'undefined') return
+      
+      const isNowVisible = !document.hidden
+      
+      if (isNowVisible && !this.isTabVisible) {
+        // Tab became visible - resume activity
+        console.log('Tab visible: resuming collaboration')
+        this.isTabVisible = true
+        
+        // Resume heartbeat immediately
+        if (this.heartbeatInterval) {
+          clearInterval(this.heartbeatInterval)
+        }
+        this.startHeartbeat()
+        
+        // Update presence immediately
+        try {
+          const paths = this.getPaths()
+          const peerRef = ref(this.rtdb, `${paths.rooms}/peers/${this.peerId}`)
+          const { onDisconnect } = await import('firebase/database')
+          await onDisconnect(peerRef).remove()
+          
+          await set(peerRef, {
+            id: this.peerId,
+            name: `User-${this.peerId.slice(0, PEER_ID_DISPLAY_LENGTH)}`,
+            connectedAt: Date.now(),
+            lastSeen: Date.now()
+          })
+        } catch (error) {
+          console.warn('Failed to update presence on tab visible:', error)
+        }
+        
+        // Check peer connections and reconnect if needed
+        this.checkAndReconnectPeers()
+        
+      } else if (!isNowVisible && this.isTabVisible) {
+        // Tab became hidden - pause heartbeat to save resources
+        console.log('Tab hidden: pausing heartbeat (connections maintained)')
+        this.isTabVisible = false
+        // Note: We don't stop heartbeat completely, just rely on existing interval
+        // Firebase will keep connection alive, and onDisconnect() will handle cleanup if needed
+      }
+    }
+    
     if (typeof window !== 'undefined') {
       window.addEventListener('beforeunload', this.beforeUnloadHandler)
-      // Also handle page hide (mobile Safari, etc.)
+      // Also handle page hide (mobile Safari, etc.) - actual page unload
       window.addEventListener('pagehide', this.beforeUnloadHandler)
-      // Handle tab visibility changes
-      window.addEventListener('visibilitychange', () => {
-        if (document.hidden && this.beforeUnloadHandler) {
-          this.beforeUnloadHandler()
+      // Handle tab visibility changes - pause/resume activity
+      window.addEventListener('visibilitychange', this.visibilityChangeHandler)
+    }
+  }
+
+  private async checkAndReconnectPeers(): Promise<void> {
+    // Check if we have active peer connections
+    const connectedPeers = Array.from(this.peers.values()).filter(p => p.connected).length
+    
+    if (connectedPeers === 0 && this.peers.size > 0) {
+      // We have peer objects but none are connected - clean up and reconnect
+      console.log('No active peer connections after tab visible, reconnecting...')
+      
+      // Clean up stale connections
+      this.peers.forEach((peer, peerId) => {
+        if (!peer.connected) {
+          try {
+            peer.destroy()
+          } catch {
+            // Ignore errors during cleanup
+          }
+          this.peers.delete(peerId)
+          this.connectionTimestamps.delete(peerId)
         }
       })
+      
+      // Force a cleanup to discover peers again
+      try {
+        await cleanupStalePeers(this.rtdb, this.docId, this.databasePaths)
+      } catch (error) {
+        console.warn('Failed to cleanup stale peers on reconnect:', error)
+      }
     }
   }
 
   destroy(): void {
+    // Mark as destroyed first
+    this.isDestroyed = true
+    
     // Perform final cleanup
     this.performMemoryCleanup()
     
@@ -577,7 +654,20 @@ class SimplePeerManager {
       this.peersRef = null
     }
 
-        // Clear memory tracking\n    this.messageBuffer = []\n    this.memoryStats = { messageBuffer: 0, connectionCount: 0, lastCleanup: Date.now(), awarenessStates: 0 }\n
+    // Remove event listeners
+    if (typeof window !== 'undefined') {
+      if (this.beforeUnloadHandler) {
+        window.removeEventListener('beforeunload', this.beforeUnloadHandler)
+        window.removeEventListener('pagehide', this.beforeUnloadHandler)
+      }
+      if (this.visibilityChangeHandler) {
+        window.removeEventListener('visibilitychange', this.visibilityChangeHandler)
+      }
+    }
+
+    // Clear memory tracking
+    this.messageBuffer = []
+    this.memoryStats = { messageBuffer: 0, connectionCount: 0, lastCleanup: Date.now(), awarenessStates: 0 }
 
     this.connectionStatus = 'disconnected'
   }
