@@ -9,7 +9,7 @@ import {
   validateConfig,
   generateUserId,
   type DatabasePathsConfig,
-} from "./config";
+} from "../src/config";
 
 describe("Config Module", () => {
   describe("buildDatabasePaths", () => {

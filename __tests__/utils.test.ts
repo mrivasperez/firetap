@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest'
-import { generateUserId } from './config'
+import { generateUserId } from '../src/config'
 
 describe('Utility Functions', () => {
   describe('generateUserId', () => {

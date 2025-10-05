@@ -9,10 +9,11 @@ import {
   loadDocumentSnapshot,
   getDocumentVersion,
   type DocumentSnapshot
-} from './persistence'
+} from '../src/persistence'
 import * as Y from 'yjs'
 import type { Database } from 'firebase/database'
-import type { DatabasePathsConfig } from './config'
+import type { DatabasePathsConfig } from '../src/config'
+import { createTestDatabase, createMockDocumentSnapshot, generateMockBase64, waitFor } from './utils/helpers'
 
 vi.mock('firebase/database', async () => {
   const actual = await vi.importActual('firebase/database')
@@ -34,10 +35,7 @@ describe('Persistence Module', () => {
   const mockDocId = 'test-doc'
 
   beforeEach(() => {
-    mockDatabase = {
-      app: { name: 'test-app' }
-    } as unknown as Database
-
+    mockDatabase = createTestDatabase()
     ydoc = new Y.Doc()
     vi.clearAllMocks()
   })
@@ -61,14 +59,10 @@ describe('Persistence Module', () => {
 
     it('should load document from snapshots when available', async () => {
       const { get } = await import('firebase/database')
-      const mockUpdate = btoa('test-update')
-      const snapshot: DocumentSnapshot = {
-        update: mockUpdate,
-        stateVector: btoa('state-vector'),
-        updatedAt: Date.now(),
-        version: 1,
-        checksum: 'abc123'
-      }
+      const snapshot = createMockDocumentSnapshot({
+        update: generateMockBase64('test-update'),
+        stateVector: generateMockBase64('state-vector')
+      })
 
       vi.mocked(get).mockResolvedValueOnce({
         exists: () => true,
@@ -82,7 +76,7 @@ describe('Persistence Module', () => {
 
     it('should fallback to legacy documents collection', async () => {
       const { get } = await import('firebase/database')
-      const mockUpdate = btoa('legacy-update')
+      const mockUpdate = generateMockBase64('legacy-update')
 
       vi.mocked(get)
         .mockResolvedValueOnce({
@@ -400,14 +394,10 @@ describe('Persistence Module', () => {
 
     it('should load snapshot data when exists', async () => {
       const { get } = await import('firebase/database')
-      const mockUpdate = btoa('snapshot-data')
-      const snapshot: DocumentSnapshot = {
-        update: mockUpdate,
-        stateVector: btoa('state'),
-        updatedAt: Date.now(),
-        version: 1,
-        checksum: 'abc123'
-      }
+      const snapshot = createMockDocumentSnapshot({
+        update: generateMockBase64('snapshot-data'),
+        stateVector: generateMockBase64('state')
+      })
 
       vi.mocked(get).mockResolvedValueOnce({
         exists: () => true,
@@ -445,13 +435,9 @@ describe('Persistence Module', () => {
     it('should return version number when document exists', async () => {
       const { get } = await import('firebase/database')
       const mockVersion = 42
-      const snapshot: DocumentSnapshot = {
-        update: btoa('data'),
-        stateVector: btoa('state'),
-        updatedAt: Date.now(),
-        version: mockVersion,
-        checksum: 'abc123'
-      }
+      const snapshot = createMockDocumentSnapshot({
+        version: mockVersion
+      })
 
       vi.mocked(get).mockResolvedValueOnce({
         exists: () => true,

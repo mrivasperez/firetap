@@ -1,7 +1,8 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest'
-import { announcePresence, stopAnnouncingPresence, cleanupStalePeers, type PeerInfo } from './cluster'
+import { announcePresence, stopAnnouncingPresence, cleanupStalePeers, type PeerInfo } from '../src/cluster'
 import type { Database } from 'firebase/database'
-import type { DatabasePathsConfig } from './config'
+import type { DatabasePathsConfig } from '../src/config'
+import { createTestDatabase, createTestPeerInfo } from './utils/helpers'
 
 vi.mock('firebase/database', async () => {
   const actual = await vi.importActual('firebase/database')
@@ -23,17 +24,10 @@ vi.mock('firebase/database', async () => {
 describe('Cluster Module', () => {
   let mockDatabase: Database
   const mockDocId = 'test-doc'
-  const mockPeer: PeerInfo = {
-    id: 'peer-123',
-    name: 'Test User',
-    connectedAt: Date.now()
-  }
+  const mockPeer: PeerInfo = createTestPeerInfo({ id: 'peer-123', name: 'Test User' })
 
   beforeEach(() => {
-    mockDatabase = {
-      app: { name: 'test-app' }
-    } as unknown as Database
-
+    mockDatabase = createTestDatabase()
     vi.clearAllMocks()
   })
 

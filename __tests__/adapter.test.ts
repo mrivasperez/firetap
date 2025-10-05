@@ -1,16 +1,17 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
-import { createFirebaseYWebrtcAdapter, type AdapterOptions, type AdapterHandle } from './adapter'
+import { createFirebaseYWebrtcAdapter, type AdapterOptions, type AdapterHandle } from '../src/adapter'
 import * as Y from 'yjs'
 import type { Database } from 'firebase/database'
+import { createTestDatabase } from './utils/helpers'
 
 // Mock modules
-vi.mock('./persistence', () => ({
+vi.mock('../src/persistence', () => ({
   startPeriodicPersistence: vi.fn(() => vi.fn()),
   loadDocumentFromFirebase: vi.fn(() => Promise.resolve(null)),
   persistDocument: vi.fn(() => Promise.resolve())
 }))
 
-vi.mock('./cluster', () => ({
+vi.mock('../src/cluster', () => ({
   announcePresence: vi.fn(() => vi.fn()),
   stopAnnouncingPresence: vi.fn(),
   cleanupStalePeers: vi.fn(() => Promise.resolve())
@@ -21,12 +22,7 @@ describe('Adapter Module', () => {
   let adapter: AdapterHandle | null = null
 
   beforeEach(() => {
-    // Create mock database
-    mockDatabase = {
-      app: { name: 'test-app' }
-    } as unknown as Database
-
-    // Reset all mocks
+    mockDatabase = createTestDatabase()
     vi.clearAllMocks()
   })
 

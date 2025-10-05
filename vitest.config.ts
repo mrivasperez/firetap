@@ -14,7 +14,7 @@ export default defineConfig({
       exclude: [
         'src/**/*.{test,spec}.ts',
         'src/**/*.d.ts',
-        '**/__tests__/**'
+        '__tests__/**'
       ]
     },
     testTimeout: 10000,
