@@ -1,5 +1,14 @@
 import { type AdapterOptions } from "./adapter";
 
+// ============================================================================
+// CONSTANTS
+// ============================================================================
+
+// Validation Limits
+const MIN_DIRECT_PEERS = 1 // Minimum number of direct peer connections
+const MAX_DIRECT_PEERS_LIMIT = 20 // Maximum number of direct peer connections (validation)
+const MIN_SYNC_INTERVAL_MS = 1_000 // Minimum sync interval (1 second)
+
 export type DatabasePathsConfig = {
   // Base path structure - can be 'flat' or 'nested'
   structure: 'flat' | 'nested';
@@ -155,13 +164,13 @@ export function validateConfig(config: Partial<CollaborationConfig>): string[] {
 
   if (
     config.maxDirectPeers &&
-    (config.maxDirectPeers < 1 || config.maxDirectPeers > 20)
+    (config.maxDirectPeers < MIN_DIRECT_PEERS || config.maxDirectPeers > MAX_DIRECT_PEERS_LIMIT)
   ) {
-    errors.push("Max direct peers must be between 1 and 20");
+    errors.push(`Max direct peers must be between ${MIN_DIRECT_PEERS} and ${MAX_DIRECT_PEERS_LIMIT}`);
   }
 
-  if (config.syncIntervalMs && config.syncIntervalMs < 1000) {
-    errors.push("Sync interval must be at least 1000ms");
+  if (config.syncIntervalMs && config.syncIntervalMs < MIN_SYNC_INTERVAL_MS) {
+    errors.push(`Sync interval must be at least ${MIN_SYNC_INTERVAL_MS}ms`);
   }
 
   return errors;

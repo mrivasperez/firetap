@@ -9,6 +9,42 @@ import { encodeAwarenessUpdate, applyAwarenessUpdate, removeAwarenessStates } fr
 
 import { type DatabasePathsConfig, buildDatabasePaths, type ConnectionState } from './config'
 
+// ============================================================================
+// CONSTANTS
+// ============================================================================
+
+// Peer Connection Configuration
+const DEFAULT_MAX_DIRECT_PEERS = 20 // Maximum number of WebRTC peer connections
+const PEER_PRESENCE_TIMEOUT_MS = 30_000 // 30 seconds - consider peer stale if not seen
+const PEER_ID_DISPLAY_LENGTH = 6 // Number of characters to show in peer ID
+
+// Memory Management
+const MAX_MESSAGE_BUFFER_SIZE = 1_000 // Maximum number of messages to keep in buffer
+const MESSAGE_BUFFER_RETENTION_MS = 3_600_000 // 1 hour - how long to keep messages in buffer
+const IDLE_PEER_TIMEOUT_MS = 300_000 // 5 minutes - timeout for idle peer connections
+const MAX_MEMORY_BUFFER_BYTES = 10 * 1024 * 1024 // 10MB - max message buffer size in bytes
+const MAX_AWARENESS_STATES = 50 // Maximum number of awareness states before cleanup
+
+// Cleanup & Heartbeat Intervals
+const CLEANUP_INTERVAL_MS = 30_000 // 30 seconds - interval for periodic cleanup
+const HEARTBEAT_INTERVAL_MS = 15_000 // 15 seconds - interval for presence heartbeat
+const STALE_CONNECTION_TIMEOUT_MS = 60_000 // 1 minute - timeout for stale connections
+const MEMORY_CHECK_INTERVAL_MS = 300_000 // 5 minutes - interval for memory monitoring
+
+// Default Configuration
+const DEFAULT_SYNC_INTERVAL_MS = 15_000 // 15 seconds - default document sync interval
+
+// WebRTC Configuration
+const STUN_SERVERS = [
+  { urls: 'stun:stun.l.google.com:19302' },
+  { urls: 'stun:stun1.l.google.com:19302' }
+]
+
+// Colors
+const DEFAULT_PEER_COLOR = '#000000' // Default color for peers without assigned color
+const MAX_COLOR_VALUE = 16777215 // 0xFFFFFF - maximum value for random color generation
+const COLOR_HEX_LENGTH = 6 // Length of hex color code (without #)
+
 export type AdapterOptions = {
   docId: string
   // Firebase database instance (required for dependency injection)
@@ -119,7 +155,7 @@ class SimplePeerManager {
 
   private maxPeers: number // Prevent too many connections
   private messageBuffer: Array<{ timestamp: number, size: number }> = []
-  private maxBufferSize = 1000
+  private maxBufferSize = MAX_MESSAGE_BUFFER_SIZE
   
   constructor(docId: string, peerId: string, ydoc: Y.Doc, awareness: Awareness, rtdb: Database, databasePaths: DatabasePathsConfig, maxDirectPeers: number = 20) {
     this.docId = docId
@@ -165,7 +201,7 @@ class SimplePeerManager {
           if (otherPeerId !== this.peerId && !this.peers.has(otherPeerId)) {
             const peerData = peers[otherPeerId]
             // Check if peer is not stale (connected within last 30 seconds)
-            if (peerData.lastSeen && (now - peerData.lastSeen) < 30000) {
+            if (peerData.lastSeen && (now - peerData.lastSeen) < PEER_PRESENCE_TIMEOUT_MS) {
               // Only create connection if we should be the initiator (deterministic)
               const shouldInitiate = this.peerId < otherPeerId
               if (shouldInitiate) {
@@ -220,10 +256,7 @@ class SimplePeerManager {
       initiator,
       trickle: false,
       config: {
-        iceServers: [
-          { urls: 'stun:stun.l.google.com:19302' },
-          { urls: 'stun:stun1.l.google.com:19302' }
-        ]
+        iceServers: STUN_SERVERS
       }
     })
 
@@ -235,7 +268,7 @@ class SimplePeerManager {
     peer.on('connect', () => {
       console.log(`Peer ${otherPeerId} connected`)
       this.connectionTimestamps.set(otherPeerId, Date.now())
-      this.emit('peer-joined', { peerId: otherPeerId, user: { id: otherPeerId, name: `User-${otherPeerId.slice(0, 6)}`, color: '#000000', connectedAt: Date.now() } })
+      this.emit('peer-joined', { peerId: otherPeerId, user: { id: otherPeerId, name: `User-${otherPeerId.slice(0, PEER_ID_DISPLAY_LENGTH)}`, color: DEFAULT_PEER_COLOR, connectedAt: Date.now() } })
       
       // Send current document state
       const update = Y.encodeStateAsUpdate(this.ydoc)
@@ -254,7 +287,7 @@ class SimplePeerManager {
           Y.applyUpdate(this.ydoc, new Uint8Array(message.update))
         } else if (message.type === 'awareness' && message.update) {
           // Apply awareness updates from peer with size limit check
-          if (this.awareness.getStates().size < 50) { // Limit awareness states
+          if (this.awareness.getStates().size < MAX_AWARENESS_STATES) { // Limit awareness states
             const awarenessUpdate = new Uint8Array(message.update)
             applyAwarenessUpdate(this.awareness, awarenessUpdate, null)
           }
@@ -347,7 +380,7 @@ class SimplePeerManager {
     this.memoryStats.messageBuffer += size
     
     // Clean old messages from buffer (keep last hour)
-    const cutoff = now - 3600000 // 1 hour
+    const cutoff = now - MESSAGE_BUFFER_RETENTION_MS
     while (this.messageBuffer.length > 0 && this.messageBuffer[0].timestamp < cutoff) {
       const old = this.messageBuffer.shift()!
       this.memoryStats.messageBuffer -= old.size
@@ -362,7 +395,7 @@ class SimplePeerManager {
   
   private cleanupIdlePeers(): void {
     const now = Date.now()
-    const idleTimeout = 300000 // 5 minutes
+    const idleTimeout = IDLE_PEER_TIMEOUT_MS
     
     this.peers.forEach((peer, peerId) => {
       if (!peer.connected && (now - this.memoryStats.lastCleanup) > idleTimeout) {
@@ -379,7 +412,7 @@ class SimplePeerManager {
     this.cleanupIdlePeers()
     
     // Clear message buffer if too large
-    if (this.memoryStats.messageBuffer > 10 * 1024 * 1024) { // 10MB
+    if (this.memoryStats.messageBuffer > MAX_MEMORY_BUFFER_BYTES) { // 10MB
       console.warn('Message buffer too large, clearing older messages')
       this.messageBuffer.splice(0, Math.floor(this.messageBuffer.length / 2))
       this.memoryStats.messageBuffer = this.messageBuffer.reduce((sum, msg) => sum + msg.size, 0)
@@ -387,7 +420,7 @@ class SimplePeerManager {
     
     // Clean up awareness states if too many
     const awarenessStates = this.awareness.getStates()
-    if (awarenessStates.size > 50) {
+    if (awarenessStates.size > MAX_AWARENESS_STATES) {
       console.warn('Too many awareness states, cleaning up old ones')
       // Remove stale awareness states (keep only connected peers)
       const connectedPeerIds = new Set(Array.from(this.peers.keys()).filter(id => {
@@ -442,7 +475,7 @@ class SimplePeerManager {
       if (this.isDestroyed) return
       
       const now = Date.now()
-      const staleTimeout = 60000 // 1 minute
+      const staleTimeout = STALE_CONNECTION_TIMEOUT_MS
       
       // Clean up stale connections
       this.connectionTimestamps.forEach((timestamp, peerId) => {
@@ -461,7 +494,7 @@ class SimplePeerManager {
       
       // Perform general memory cleanup
       this.performMemoryCleanup()
-    }, 30000) // Run every 30 seconds
+    }, CLEANUP_INTERVAL_MS) // Run every 30 seconds
   }
 
   private startHeartbeat(): void {
@@ -477,8 +510,8 @@ class SimplePeerManager {
         const peerRef = ref(this.rtdb, `${paths.rooms}/peers/${this.peerId}`)
         const currentData = {
           id: this.peerId,
-          name: `User-${this.peerId.slice(0, 6)}`,
-          color: '#' + Math.floor(Math.random() * 16777215).toString(16).padStart(6, '0'),
+          name: `User-${this.peerId.slice(0, PEER_ID_DISPLAY_LENGTH)}`,
+          color: '#' + Math.floor(Math.random() * MAX_COLOR_VALUE).toString(16).padStart(COLOR_HEX_LENGTH, '0'),
           connectedAt: Date.now(),
           lastSeen: Date.now()
         }
@@ -486,7 +519,7 @@ class SimplePeerManager {
       } catch (error) {
         console.warn('Failed to update heartbeat:', error)
       }
-    }, 15000) // Every 15 seconds
+    }, HEARTBEAT_INTERVAL_MS) // Every 15 seconds
   }
 
   private setupBeforeUnloadHandler(): void {
@@ -557,8 +590,8 @@ export async function createFirebaseYWebrtcAdapter(opts: AdapterOptions): Promis
     firebaseDatabase,
     peerId = crypto.randomUUID(), 
     user = {}, 
-    syncIntervalMs = 15_000,
-    maxDirectPeers = 20,
+    syncIntervalMs = DEFAULT_SYNC_INTERVAL_MS,
+    maxDirectPeers = DEFAULT_MAX_DIRECT_PEERS,
     databasePaths
   } = opts
 
@@ -571,11 +604,11 @@ export async function createFirebaseYWebrtcAdapter(opts: AdapterOptions): Promis
   
   const awareness = new Awareness(ydoc)
   // Limit awareness state size to prevent memory bloat
-  const maxAwarenessStates = 50
+  const maxAwarenessStates = MAX_AWARENESS_STATES
   
   // Memory monitoring for long-running sessions
   let lastMemoryCheck = Date.now()
-  const memoryCheckInterval = 300_000 // 5 minutes
+  const memoryCheckInterval = MEMORY_CHECK_INTERVAL_MS
 
   // 2) Load persisted state from Firebase (if any)
   try {
@@ -590,8 +623,8 @@ export async function createFirebaseYWebrtcAdapter(opts: AdapterOptions): Promis
   // 3) Create peer info for Firebase presence
   const peerInfo: PeerInfo = {
     id: peerId,
-    name: user.name || `User-${peerId.slice(0, 6)}`,
-    color: user.color || '#' + Math.floor(Math.random() * 16777215).toString(16).padStart(6, '0'),
+    name: user.name || `User-${peerId.slice(0, PEER_ID_DISPLAY_LENGTH)}`,
+    color: user.color || '#' + Math.floor(Math.random() * MAX_COLOR_VALUE).toString(16).padStart(COLOR_HEX_LENGTH, '0'),
     connectedAt: Date.now(),
   }
 

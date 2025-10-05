@@ -2,6 +2,14 @@ import type { Database } from 'firebase/database'
 import { ref, set, remove } from 'firebase/database'
 import { buildDatabasePaths, type DatabasePathsConfig } from './config'
 
+// ============================================================================
+// CONSTANTS
+// ============================================================================
+
+// Peer Presence Configuration
+const STALE_PEER_THRESHOLD_MS = 120_000 // 2 minutes - consider peer stale after this time
+const MILLISECONDS_TO_SECONDS = 1_000 // Conversion factor for time display
+
 export type PeerInfo = {
   id: string
   name: string
@@ -48,14 +56,14 @@ export async function cleanupStalePeers(rtdb: Database, docId: string, databaseP
     if (snapshot.exists()) {
       const peers = snapshot.val()
       const now = Date.now()
-      const staleThreshold = 120000 // 2 minutes
+      const staleThreshold = STALE_PEER_THRESHOLD_MS
       
       const stalePromises: Promise<void>[] = []
       
       Object.entries(peers).forEach(([peerId, peerData]) => {
         const peer = peerData as PeerInfo & { lastSeen?: number }
         if (peer.lastSeen && (now - peer.lastSeen) > staleThreshold) {
-          console.log(`Removing stale peer: ${peerId} (last seen ${(now - peer.lastSeen) / 1000}s ago)`)
+          console.log(`Removing stale peer: ${peerId} (last seen ${(now - peer.lastSeen) / MILLISECONDS_TO_SECONDS}s ago)`)
           const stalePeerRef = ref(rtdb, `${paths.rooms}/peers/${peerId}`)
           stalePromises.push(remove(stalePeerRef))
           

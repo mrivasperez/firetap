@@ -3,6 +3,17 @@ import type { Database } from 'firebase/database'
 import { ref, set, get, serverTimestamp, runTransaction } from 'firebase/database'
 import { buildDatabasePaths, type DatabasePathsConfig } from './config'
 
+// ============================================================================
+// CONSTANTS
+// ============================================================================
+
+// Persistence Configuration
+const PERSISTENCE_DEBOUNCE_MS = 2_000 // 2 seconds - debounce rapid changes
+const DEFAULT_PERSISTENCE_INTERVAL_MS = 60_000 // 60 seconds - default periodic save interval
+
+// Hash Algorithm
+const CHECKSUM_ALGORITHM = 'SHA-256' // Algorithm for document checksums
+
 export type DocumentSnapshot = {
   update: string
   stateVector: string
@@ -42,7 +53,7 @@ export async function loadDocumentFromFirebase(rtdb: Database, docId: string, da
   }
 }
 
-export function startPeriodicPersistence(rtdb: Database, ydoc: Y.Doc, docId: string, intervalMs = 60_000, databasePaths?: DatabasePathsConfig) {
+export function startPeriodicPersistence(rtdb: Database, ydoc: Y.Doc, docId: string, intervalMs = DEFAULT_PERSISTENCE_INTERVAL_MS, databasePaths?: DatabasePathsConfig) {
   let persistenceCount = 0
   let lastPersistedState: string | null = null
   let debounceTimer: ReturnType<typeof setTimeout> | null = null
@@ -70,7 +81,7 @@ export function startPeriodicPersistence(rtdb: Database, ydoc: Y.Doc, docId: str
           console.warn('debounced persistence failed', err)
         }
       }
-    }, 2000) // 2 second debounce
+    }, PERSISTENCE_DEBOUNCE_MS) // 2 second debounce
   }
   
   // Listen for document updates
@@ -344,7 +355,7 @@ async function calculateChecksum(data: Uint8Array): Promise<string> {
   const view = new Uint8Array(buffer)
   view.set(data)
   
-  const hashBuffer = await crypto.subtle.digest('SHA-256', buffer)
+  const hashBuffer = await crypto.subtle.digest(CHECKSUM_ALGORITHM, buffer)
   const hashArray = Array.from(new Uint8Array(hashBuffer))
   return hashArray.map(b => b.toString(16).padStart(2, '0')).join('')
 }
