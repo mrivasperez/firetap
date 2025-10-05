@@ -40,17 +40,12 @@ const STUN_SERVERS = [
   { urls: 'stun:stun1.l.google.com:19302' }
 ]
 
-// Colors
-const DEFAULT_PEER_COLOR = '#000000' // Default color for peers without assigned color
-const MAX_COLOR_VALUE = 16777215 // 0xFFFFFF - maximum value for random color generation
-const COLOR_HEX_LENGTH = 6 // Length of hex color code (without #)
-
 export type AdapterOptions = {
   docId: string
   // Firebase database instance (required for dependency injection)
   firebaseDatabase: Database
   peerId?: string
-  user?: { name?: string; color?: string }
+  user?: { name?: string }
   syncIntervalMs?: number
   maxDirectPeers?: number
   databasePaths?: DatabasePathsConfig
@@ -268,7 +263,7 @@ class SimplePeerManager {
     peer.on('connect', () => {
       console.log(`Peer ${otherPeerId} connected`)
       this.connectionTimestamps.set(otherPeerId, Date.now())
-      this.emit('peer-joined', { peerId: otherPeerId, user: { id: otherPeerId, name: `User-${otherPeerId.slice(0, PEER_ID_DISPLAY_LENGTH)}`, color: DEFAULT_PEER_COLOR, connectedAt: Date.now() } })
+      this.emit('peer-joined', { peerId: otherPeerId, user: { id: otherPeerId, name: `User-${otherPeerId.slice(0, PEER_ID_DISPLAY_LENGTH)}`, connectedAt: Date.now() } })
       
       // Send current document state
       const update = Y.encodeStateAsUpdate(this.ydoc)
@@ -511,7 +506,6 @@ class SimplePeerManager {
         const currentData = {
           id: this.peerId,
           name: `User-${this.peerId.slice(0, PEER_ID_DISPLAY_LENGTH)}`,
-          color: '#' + Math.floor(Math.random() * MAX_COLOR_VALUE).toString(16).padStart(COLOR_HEX_LENGTH, '0'),
           connectedAt: Date.now(),
           lastSeen: Date.now()
         }
@@ -624,7 +618,6 @@ export async function createFirebaseYWebrtcAdapter(opts: AdapterOptions): Promis
   const peerInfo: PeerInfo = {
     id: peerId,
     name: user.name || `User-${peerId.slice(0, PEER_ID_DISPLAY_LENGTH)}`,
-    color: user.color || '#' + Math.floor(Math.random() * MAX_COLOR_VALUE).toString(16).padStart(COLOR_HEX_LENGTH, '0'),
     connectedAt: Date.now(),
   }
 
@@ -647,7 +640,6 @@ export async function createFirebaseYWebrtcAdapter(opts: AdapterOptions): Promis
   // 6) Set up awareness with user info
   awareness.setLocalStateField('user', {
     name: peerInfo.name,
-    color: peerInfo.color,
     id: peerId
   })
 

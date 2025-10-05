@@ -43,7 +43,6 @@ export type CollaborationConfig = {
   // User settings
   user: {
     name: string;
-    color?: string;
   };
 
   // Network settings
@@ -101,7 +100,6 @@ export function createAdapterConfig(
     docId: mergedConfig.docId,
     user: {
       name: mergedConfig.user.name,
-      color: mergedConfig.user.color,
     },
     maxDirectPeers: mergedConfig.maxDirectPeers,
     syncIntervalMs: mergedConfig.syncIntervalMs,
@@ -109,14 +107,12 @@ export function createAdapterConfig(
   };
 }
 
-// generateRandomColor moved to client/src/utils/color.ts
-
 export function generateUserId(): string {
   return `user-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
 }
 
 // Configuration creators (return partial configs - user must add firebaseDatabase)
-export function createSimpleConfig(docId: string, user: { name: string; color?: string }): Omit<AdapterOptions, 'firebaseDatabase'> {
+export function createSimpleConfig(docId: string, user: { name: string }): Omit<AdapterOptions, 'firebaseDatabase'> {
   return {
     docId,
     user,
@@ -129,7 +125,7 @@ export function createSimpleConfig(docId: string, user: { name: string; color?: 
 export function createWorkspaceConfig(
   docId: string, 
   workspaceId: string, 
-  user: { name: string; color?: string }
+  user: { name: string }
 ): Omit<AdapterOptions, 'firebaseDatabase'> {
   return {
     docId,

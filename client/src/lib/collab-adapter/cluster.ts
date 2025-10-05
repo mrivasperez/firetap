@@ -13,7 +13,6 @@ const MILLISECONDS_TO_SECONDS = 1_000 // Conversion factor for time display
 export type PeerInfo = {
   id: string
   name: string
-  color: string
   connectedAt: number
 }
 
