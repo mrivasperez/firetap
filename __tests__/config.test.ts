@@ -10,6 +10,9 @@ import {
   generateUserId,
   type DatabasePathsConfig,
 } from "../src/config";
+import {
+  createTestDatabasePaths,
+} from "./utils/helpers";
 
 describe("Config Module", () => {
   describe("buildDatabasePaths", () => {
@@ -71,35 +74,19 @@ describe("Config Module", () => {
 
     describe("with flat structure", () => {
       it("should use provided documents path directly", () => {
-        const flatConfig: DatabasePathsConfig = {
-          structure: "flat",
-          flat: {
-            documents: "/docs",
-            rooms: "/rooms",
-            snapshots: "/snaps",
-            signaling: "/signals",
-          },
-        };
+        const flatConfig = createTestDatabasePaths();
 
         const paths = buildDatabasePaths(flatConfig, "test-doc");
 
-        expect(paths.documents).toBe("/docs");
+        expect(paths.documents).toBe("/test-docs");
       });
 
       it("should use provided signaling path directly", () => {
-        const flatConfig: DatabasePathsConfig = {
-          structure: "flat",
-          flat: {
-            documents: "/docs",
-            rooms: "/rooms",
-            snapshots: "/snaps",
-            signaling: "/signals",
-          },
-        };
+        const flatConfig = createTestDatabasePaths();
 
         const paths = buildDatabasePaths(flatConfig, "test-doc");
 
-        expect(paths.signaling).toBe("/signals");
+        expect(paths.signaling).toBe("/test-signals");
       });
 
       it("should throw error when flat config is missing", () => {
