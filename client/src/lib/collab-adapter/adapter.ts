@@ -5,7 +5,7 @@ import { startPeriodicPersistence, loadDocumentFromFirebase } from './persistenc
 import { announcePresence, stopAnnouncingPresence, cleanupStalePeers, type PeerInfo } from './cluster'
 import type { Database } from 'firebase/database'
 import { ref, set, remove, onValue, push, off } from 'firebase/database'
-import { encodeAwarenessUpdate, applyAwarenessUpdate } from 'y-protocols/awareness'
+import { encodeAwarenessUpdate, applyAwarenessUpdate, removeAwarenessStates } from 'y-protocols/awareness'
 
 import { type DatabasePathsConfig, buildDatabasePaths, type ConnectionState } from './config'
 
@@ -389,8 +389,26 @@ class SimplePeerManager {
     const awarenessStates = this.awareness.getStates()
     if (awarenessStates.size > 50) {
       console.warn('Too many awareness states, cleaning up old ones')
-      // Clear excess awareness states by recreating awareness
-      this.awareness.destroy()
+      // Remove stale awareness states (keep only connected peers)
+      const connectedPeerIds = new Set(Array.from(this.peers.keys()).filter(id => {
+        const peer = this.peers.get(id)
+        return peer && peer.connected
+      }))
+      connectedPeerIds.add(this.peerId)
+      
+      // Remove states for disconnected peers
+      const clientsToRemove: number[] = []
+      awarenessStates.forEach((_state, clientId) => {
+        if (!connectedPeerIds.has(String(clientId)) && clientId !== this.ydoc.clientID) {
+          clientsToRemove.push(clientId)
+        }
+      })
+      
+      if (clientsToRemove.length > 0) {
+        // Properly remove stale awareness states
+        removeAwarenessStates(this.awareness, clientsToRemove, null)
+        console.log(`Removed ${clientsToRemove.length} stale awareness states`)
+      }
     }
   }
   
@@ -636,7 +654,25 @@ export async function createFirebaseYWebrtcAdapter(opts: AdapterOptions): Promis
       const awarenessStates = awareness.getStates()
       if (awarenessStates.size > maxAwarenessStates) {
         console.warn(`Too many awareness states (${awarenessStates.size}), cleaning up`)
-        awareness.destroy() // This will clean up and recreate
+        // Get list of currently connected peers from peer manager
+        const connectedPeers = new Set<number>()
+        connectedPeers.add(ydoc.clientID) // Always keep our own client
+        
+        // Collect client IDs that should be removed (stale states)
+        const clientsToRemove: number[] = []
+        awarenessStates.forEach((_state, clientId) => {
+          // Keep only our own state and remove others
+          // The peer manager will re-add connected peers' states
+          if (clientId !== ydoc.clientID) {
+            clientsToRemove.push(clientId)
+          }
+        })
+        
+        if (clientsToRemove.length > 0) {
+          // Remove stale awareness states properly
+          removeAwarenessStates(awareness, clientsToRemove, null)
+          console.log(`Removed ${clientsToRemove.length} stale awareness states`)
+        }
       }
     }
   }, memoryCheckInterval)
