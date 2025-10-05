@@ -1,0 +1,20 @@
+{
+  "name": "firetap",
+  "version": "1.0.0-alpha",
+  "description": "A Yjs provider for building real-time, collaborative TipTap editors with Firebase Realtime Database.",
+  "homepage": "https://github.com/mrivasperez/project-realtime-tiptap#readme",
+  "bugs": {
+    "url": "https://github.com/mrivasperez/project-realtime-tiptap/issues"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/mrivasperez/project-realtime-tiptap.git"
+  },
+  "license": "ISC",
+  "author": "",
+  "type": "commonjs",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  }
+}

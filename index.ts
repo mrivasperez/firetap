@@ -2,8 +2,8 @@ import type * as Y from 'yjs'
 import type { Awareness } from 'y-protocols/awareness'
 
 // Main adapter factory
-export { default as createFirebaseYWebrtcAdapter } from './adapter'
-export type { AdapterOptions, AdapterHandle } from './adapter'
+export { default as createFirebaseYWebrtcAdapter } from './src/adapter'
+export type { AdapterOptions, AdapterHandle } from './src/adapter'
 
 // Configuration utilities
 export { 
@@ -15,12 +15,12 @@ export {
   createAdapterConfig,
   validateConfig,
   generateUserId
-} from './config'
+} from './src/config'
 export type { 
   DatabasePathsConfig, 
   CollaborationConfig,
   ConnectionState 
-} from './config'
+} from './src/config'
 
 // Persistence utilities (for advanced users)
 export { 
@@ -28,16 +28,16 @@ export {
   persistDocument,
   createDocumentSnapshot,
   getDocumentVersion
-} from './persistence'
-export type { DocumentSnapshot } from './persistence'
+} from './src/persistence'
+export type { DocumentSnapshot } from './src/persistence'
 
 // Clustering utilities
-export { announcePresence, stopAnnouncingPresence } from './cluster'
-export type { PeerInfo } from './cluster'
+export { announcePresence, stopAnnouncingPresence } from './src/cluster'
+export type { PeerInfo } from './src/cluster'
 
 // Re-export types from config and cluster
-import type { ConnectionState } from './config'
-import type { PeerInfo } from './cluster'
+import type { ConnectionState } from './src/config'
+import type { PeerInfo } from './src/cluster'
 
 // Event types for the adapter
 export type AdapterEvents = {
@@ -71,7 +71,7 @@ export type YDocumentAdapter = {
 }
 
 // Re-export AdapterOptions for factory
-import type { AdapterOptions } from './adapter'
+import type { AdapterOptions } from './src/adapter'
 
 export type AdapterFactory<TOptions = AdapterOptions> = {
   create(options: TOptions): Promise<YDocumentAdapter>
