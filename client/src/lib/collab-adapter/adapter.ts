@@ -178,11 +178,20 @@ class SimplePeerManager {
     onValue(this.signalingRef, (snapshot) => {
       if (snapshot.exists() && !this.isDestroyed) {
         const signals = snapshot.val()
-        Object.entries(signals).forEach(([key, signal]) => {
-          this.handleSignalData(signal as SignalData)
-          // Clean up processed signal
-          remove(ref(this.rtdb, `${this.getPaths().signaling}/${this.peerId}/${key}`))
+        const signalKeys = Object.keys(signals)
+        
+        // Process all signals first
+        signalKeys.forEach(key => {
+          this.handleSignalData(signals[key] as SignalData)
         })
+        
+        // OPTIMIZED: Batch delete all processed signals at once
+        // This reduces Firebase delete operations from N to 1
+        if (signalKeys.length > 0 && this.signalingRef) {
+          set(this.signalingRef, null).catch(error => {
+            console.warn('Failed to batch delete signals:', error)
+          })
+        }
       }
     })
 
@@ -316,6 +325,7 @@ class SimplePeerManager {
       timestamp: Date.now()
     }
     
+    // Push signal to target peer's signaling path
     const messageRef = push(ref(this.rtdb, `${this.getPaths().signaling}/${targetPeerId}`))
     await set(messageRef, signalData)
   }
