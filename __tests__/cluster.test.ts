@@ -6,7 +6,6 @@ import {
   type PeerInfo,
 } from "../src/cluster";
 import type { Database } from "firebase/database";
-import type { DatabasePathsConfig } from "../src/config";
 import { createTestDatabase, createTestPeerInfo, createCustomDatabasePaths } from "./utils/helpers";
 
 vi.mock("firebase/database", async () => {

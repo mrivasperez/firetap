@@ -17,7 +17,6 @@ import {
   createTestDatabase,
   createMockDocumentSnapshot,
   generateMockBase64,
-  waitFor,
   createCustomDatabasePaths,
 } from "./utils/helpers";
 
