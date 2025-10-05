@@ -174,25 +174,6 @@ export function validateConfig(config: Partial<CollaborationConfig>): string[] {
 
 export type ConnectionState = "disconnected" | "connecting" | "connected";
 
-export function formatConnectionState(state: ConnectionState): string {
-  switch (state) {
-    case "disconnected":
-      return "🔴 Disconnected";
-    case "connecting":
-      return "🟡 Connecting...";
-    case "connected":
-      return "🟢 Connected";
-    default:
-      return "⚫ Unknown";
-  }
-}
-
-export function formatPeerCount(count: number): string {
-  if (count === 0) return "Solo";
-  if (count === 1) return "1 peer";
-  return `${count} peers`;
-}
-
 export function buildDatabasePaths(config: DatabasePathsConfig, docId: string) {
   if (config.structure === 'flat') {
     if (!config.flat) throw new Error('Flat structure requires flat config');
