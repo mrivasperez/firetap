@@ -639,16 +639,8 @@ export async function createFirebaseYWebrtcAdapter(opts: AdapterOptions): Promis
     if (now - lastMemoryCheck > memoryCheckInterval) {
       lastMemoryCheck = now
       
-      // Trigger Y.js garbage collection
-      if (ydoc.gc) {
-        // Force GC by encoding/decoding document state
-        const state = Y.encodeStateAsUpdate(ydoc)
-        const tempDoc = new Y.Doc()
-        tempDoc.gc = true
-        Y.applyUpdate(tempDoc, state)
-        tempDoc.destroy()
-      }
-      
+      // Note: Y.js garbage collection runs automatically when ydoc.gc = true
+      // No manual intervention needed - GC cleans up deleted operations automatically
       
       // Clean up awareness states if needed
       const awarenessStates = awareness.getStates()
@@ -725,14 +717,10 @@ export async function createFirebaseYWebrtcAdapter(opts: AdapterOptions): Promis
     getUserInfo: () => peerInfo,
     getMemoryStats: () => peerManager.getMemoryStats(),
     forceGarbageCollection: () => {
-      // Trigger immediate Y.js GC
-      if (ydoc.gc) {
-        const state = Y.encodeStateAsUpdate(ydoc)
-        const tempDoc = new Y.Doc()
-        tempDoc.gc = true
-        Y.applyUpdate(tempDoc, state)
-        tempDoc.destroy()
-      }
+      // Y.js handles garbage collection automatically when ydoc.gc = true
+      // GC runs incrementally during document operations - no manual triggering needed
+      // This method is kept for API compatibility but is essentially a no-op
+      console.log('Y.js GC is automatic when ydoc.gc = true (current state:', ydoc.gc, ')')
     },
     on: <K extends keyof AdapterEvents>(event: K, callback: (data: AdapterEvents[K]) => void) => 
       peerManager.on(event, callback),
