@@ -1,4 +1,4 @@
-import { describe, it, expect } from 'vitest'
+import { describe, it, expect } from "vitest";
 import {
   buildDatabasePaths,
   DEFAULT_DATABASE_PATHS,
@@ -8,299 +8,510 @@ import {
   createAdapterConfig,
   validateConfig,
   generateUserId,
-  type DatabasePathsConfig
-} from './config'
+  type DatabasePathsConfig,
+} from "./config";
 
-describe('Config Module', () => {
-  describe('buildDatabasePaths', () => {
-    it('should build nested paths with document ID', () => {
-      const paths = buildDatabasePaths(DEFAULT_DATABASE_PATHS, 'test-doc')
+describe("Config Module", () => {
+  describe("buildDatabasePaths", () => {
+    describe("with nested structure", () => {
+      it("should build documents path under base path", () => {
+        // Arrange
+        const docId = "test-doc";
 
-      expect(paths.documents).toBe('/documents/test-doc/documents')
-      expect(paths.rooms).toBe('/documents/test-doc/rooms')
-      expect(paths.snapshots).toBe('/documents/test-doc/snapshots')
-      expect(paths.signaling).toBe('/documents/test-doc/signaling')
-    })
+        // Act
+        const paths = buildDatabasePaths(DEFAULT_DATABASE_PATHS, docId);
 
-    it('should build flat paths when structure is flat', () => {
-      const flatConfig: DatabasePathsConfig = {
-        structure: 'flat',
-        flat: {
-          documents: '/docs',
-          rooms: '/rooms',
-          snapshots: '/snaps',
-          signaling: '/signals'
-        }
+        // Assert
+        expect(paths.documents).toBe("/documents/test-doc/documents");
+      });
+
+      it("should build rooms path under base path", () => {
+        // Arrange
+        const docId = "test-doc";
+
+        // Act
+        const paths = buildDatabasePaths(DEFAULT_DATABASE_PATHS, docId);
+
+        // Assert
+        expect(paths.rooms).toBe("/documents/test-doc/rooms");
+      });
+
+      it("should build signaling path under base path", () => {
+        // Arrange
+        const docId = "test-doc";
+
+        // Act
+        const paths = buildDatabasePaths(DEFAULT_DATABASE_PATHS, docId);
+
+        // Assert
+        expect(paths.signaling).toBe("/documents/test-doc/signaling");
+      });
+
+      it("should support custom workspace base paths", () => {
+        // Arrange
+        const workspaceConfig: DatabasePathsConfig = {
+          structure: "nested",
+          nested: {
+            basePath: "/workspace-1/documents",
+            subPaths: {
+              documents: "documents",
+              rooms: "rooms",
+              snapshots: "snapshots",
+              signaling: "signaling",
+            },
+          },
+        };
+        const docId = "doc-1";
+
+        // Act
+        const paths = buildDatabasePaths(workspaceConfig, docId);
+
+        // Assert
+        expect(paths.documents).toBe("/workspace-1/documents/doc-1/documents");
+      });
+
+      it("should throw error when nested config is missing", () => {
+        // Arrange
+        const invalidConfig: DatabasePathsConfig = {
+          structure: "nested",
+        };
+
+        // Act & Assert
+        expect(() => buildDatabasePaths(invalidConfig, "test-doc")).toThrow(
+          "Nested structure requires nested config"
+        );
+      });
+    });
+
+    describe("with flat structure", () => {
+      it("should use provided documents path directly", () => {
+        // Arrange
+        const flatConfig: DatabasePathsConfig = {
+          structure: "flat",
+          flat: {
+            documents: "/docs",
+            rooms: "/rooms",
+            snapshots: "/snaps",
+            signaling: "/signals",
+          },
+        };
+
+        // Act
+        const paths = buildDatabasePaths(flatConfig, "test-doc");
+
+        // Assert
+        expect(paths.documents).toBe("/docs");
+      });
+
+      it("should use provided signaling path directly", () => {
+        // Arrange
+        const flatConfig: DatabasePathsConfig = {
+          structure: "flat",
+          flat: {
+            documents: "/docs",
+            rooms: "/rooms",
+            snapshots: "/snaps",
+            signaling: "/signals",
+          },
+        };
+
+        // Act
+        const paths = buildDatabasePaths(flatConfig, "test-doc");
+
+        // Assert
+        expect(paths.signaling).toBe("/signals");
+      });
+
+      it("should throw error when flat config is missing", () => {
+        // Arrange
+        const invalidConfig: DatabasePathsConfig = {
+          structure: "flat",
+        };
+
+        // Act & Assert
+        expect(() => buildDatabasePaths(invalidConfig, "test-doc")).toThrow(
+          "Flat structure requires flat config"
+        );
+      });
+    });
+  });
+
+  describe("createSimpleConfig", () => {
+    it("should use provided document ID", () => {
+      // Arrange
+      const docId = "my-document";
+      const user = { name: "Test User" };
+
+      // Act
+      const config = createSimpleConfig(docId, user);
+
+      // Assert
+      expect(config.docId).toBe("my-document");
+    });
+
+    it("should use provided user name", () => {
+      // Arrange
+      const docId = "doc-1";
+      const user = { name: "Jane Doe" };
+
+      // Act
+      const config = createSimpleConfig(docId, user);
+
+      // Assert
+      expect(config.user.name).toBe("Jane Doe");
+    });
+
+    it("should set default max direct peers", () => {
+      // Arrange
+      const docId = "doc-1";
+      const user = { name: "Test User" };
+
+      // Act
+      const config = createSimpleConfig(docId, user);
+
+      // Assert
+      expect(config.maxDirectPeers).toBe(6);
+    });
+
+    it("should include database paths configuration", () => {
+      // Arrange
+      const docId = "doc-1";
+      const user = { name: "Test User" };
+
+      // Act
+      const config = createSimpleConfig(docId, user);
+
+      // Assert
+      expect(config.databasePaths).toBeDefined();
+    });
+
+    it("should not include firebaseDatabase property", () => {
+      // Arrange
+      const docId = "doc-1";
+      const user = { name: "Test User" };
+
+      // Act
+      const config = createSimpleConfig(docId, user);
+
+      // Assert
+      expect(config).not.toHaveProperty("firebaseDatabase");
+    });
+  });
+
+  describe("createWorkspaceConfig", () => {
+    it("should include workspace in database base path", () => {
+      // Arrange
+      const docId = "doc-1";
+      const workspaceId = "my-workspace";
+      const user = { name: "Test User" };
+
+      // Act
+      const config = createWorkspaceConfig(docId, workspaceId, user);
+
+      // Assert
+      if (config.databasePaths?.structure === "nested") {
+        expect(config.databasePaths.nested?.basePath).toBe(
+          "/my-workspace/documents"
+        );
       }
+    });
 
-      const paths = buildDatabasePaths(flatConfig, 'test-doc')
+    it("should create paths that include workspace identifier", () => {
+      // Arrange
+      const docId = "doc-1";
+      const workspaceId = "workspace-123";
+      const user = { name: "Test User" };
 
-      expect(paths.documents).toBe('/docs')
-      expect(paths.rooms).toBe('/rooms')
-      expect(paths.snapshots).toBe('/snaps')
-      expect(paths.signaling).toBe('/signals')
-    })
+      // Act
+      const config = createWorkspaceConfig(docId, workspaceId, user);
 
-    it('should handle workspace paths', () => {
-      const workspaceConfig: DatabasePathsConfig = {
-        structure: 'nested',
-        nested: {
-          basePath: '/workspace-1/documents',
-          subPaths: {
-            documents: 'documents',
-            rooms: 'rooms',
-            snapshots: 'snapshots',
-            signaling: 'signaling'
-          }
-        }
-      }
-
-      const paths = buildDatabasePaths(workspaceConfig, 'doc-1')
-
-      expect(paths.documents).toBe('/workspace-1/documents/doc-1/documents')
-      expect(paths.signaling).toBe('/workspace-1/documents/doc-1/signaling')
-    })
-
-    it('should throw error for flat structure without flat config', () => {
-      const invalidConfig: DatabasePathsConfig = {
-        structure: 'flat'
-      }
-
-      expect(() => buildDatabasePaths(invalidConfig, 'test-doc')).toThrow('Flat structure requires flat config')
-    })
-
-    it('should throw error for nested structure without nested config', () => {
-      const invalidConfig: DatabasePathsConfig = {
-        structure: 'nested'
-      }
-
-      expect(() => buildDatabasePaths(invalidConfig, 'test-doc')).toThrow('Nested structure requires nested config')
-    })
-  })
-
-  describe('createSimpleConfig', () => {
-    it('should create a valid simple configuration', () => {
-      const config = createSimpleConfig('doc-1', { name: 'Test User' })
-
-      expect(config.docId).toBe('doc-1')
-      expect(config.user.name).toBe('Test User')
-      expect(config.maxDirectPeers).toBe(6)
-      expect(config.syncIntervalMs).toBe(15000)
-      expect(config.databasePaths).toBeDefined()
-      expect(config.databasePaths?.structure).toBe('nested')
-    })
-
-    it('should not include firebaseDatabase', () => {
-      const config = createSimpleConfig('doc-1', { name: 'Test User' })
-      
-      expect(config).not.toHaveProperty('firebaseDatabase')
-    })
-  })
-
-  describe('createWorkspaceConfig', () => {
-    it('should create workspace configuration with custom base path', () => {
-      const config = createWorkspaceConfig('doc-1', 'workspace-1', { name: 'Test User' })
-
-      expect(config.docId).toBe('doc-1')
-      expect(config.user.name).toBe('Test User')
-      expect(config.databasePaths?.structure).toBe('nested')
-      
-      if (config.databasePaths?.structure === 'nested') {
-        expect(config.databasePaths.nested?.basePath).toBe('/workspace-1/documents')
-      }
-    })
-
-    it('should generate correct paths for workspace', () => {
-      const config = createWorkspaceConfig('doc-1', 'my-workspace', { name: 'Test User' })
-      
+      // Assert
       if (config.databasePaths) {
-        const paths = buildDatabasePaths(config.databasePaths, 'doc-1')
-        expect(paths.documents).toContain('my-workspace')
+        const paths = buildDatabasePaths(config.databasePaths, docId);
+        expect(paths.documents).toContain("workspace-123");
       }
-    })
-  })
+    });
+  });
 
-  describe('createAdapterConfig', () => {
-    it('should merge with default config', () => {
-      const config = createAdapterConfig({
-        docId: 'test-doc',
-        user: { name: 'Custom User' }
-      })
+  describe("createAdapterConfig", () => {
+    it("should merge user-provided config with defaults", () => {
+      // Arrange
+      const userConfig = {
+        docId: "test-doc",
+        user: { name: "Custom User" },
+      };
 
-      expect(config.docId).toBe('test-doc')
-      expect(config.user.name).toBe('Custom User')
-      expect(config.maxDirectPeers).toBe(DEFAULT_CONFIG.maxDirectPeers)
-      expect(config.syncIntervalMs).toBe(DEFAULT_CONFIG.syncIntervalMs)
-    })
+      // Act
+      const config = createAdapterConfig(userConfig);
 
-    it('should allow overriding defaults', () => {
-      const config = createAdapterConfig({
-        docId: 'test-doc',
-        user: { name: 'User' },
+      // Assert
+      expect(config.docId).toBe("test-doc");
+    });
+
+    it("should allow overriding default max peers", () => {
+      // Arrange
+      const userConfig = {
+        docId: "test-doc",
+        user: { name: "User" },
         maxDirectPeers: 10,
-        syncIntervalMs: 30000
-      })
+      };
 
-      expect(config.maxDirectPeers).toBe(10)
-      expect(config.syncIntervalMs).toBe(30000)
-    })
+      // Act
+      const config = createAdapterConfig(userConfig);
 
-    it('should use provided database paths', () => {
+      // Assert
+      expect(config.maxDirectPeers).toBe(10);
+    });
+
+    it("should use default sync interval when not specified", () => {
+      // Arrange
+      const userConfig = {
+        docId: "test-doc",
+        user: { name: "User" },
+      };
+
+      // Act
+      const config = createAdapterConfig(userConfig);
+
+      // Assert
+      expect(config.syncIntervalMs).toBe(DEFAULT_CONFIG.syncIntervalMs);
+    });
+
+    it("should accept custom database paths", () => {
+      // Arrange
       const customPaths: DatabasePathsConfig = {
-        structure: 'flat',
+        structure: "flat",
         flat: {
-          documents: '/custom-docs',
-          rooms: '/custom-rooms',
-          snapshots: '/custom-snaps',
-          signaling: '/custom-signals'
-        }
-      }
+          documents: "/custom-docs",
+          rooms: "/custom-rooms",
+          snapshots: "/custom-snaps",
+          signaling: "/custom-signals",
+        },
+      };
+      const userConfig = {
+        docId: "test-doc",
+        user: { name: "User" },
+        databasePaths: customPaths,
+      };
 
-      const config = createAdapterConfig({
-        docId: 'test-doc',
-        user: { name: 'User' },
-        databasePaths: customPaths
-      })
+      // Act
+      const config = createAdapterConfig(userConfig);
 
-      expect(config.databasePaths).toEqual(customPaths)
-    })
-  })
+      // Assert
+      expect(config.databasePaths).toEqual(customPaths);
+    });
+  });
 
-  describe('validateConfig', () => {
-    it('should return empty array for valid configuration', () => {
-      const errors = validateConfig({
-        docId: 'test-doc',
-        user: { name: 'Test User' },
+  describe("validateConfig", () => {
+    it("should return no errors for valid configuration", () => {
+      // Arrange
+      const validConfig = {
+        docId: "test-doc",
+        user: { name: "Test User" },
         maxDirectPeers: 6,
-        syncIntervalMs: 15000
-      })
+        syncIntervalMs: 15000,
+      };
 
-      expect(errors).toEqual([])
-    })
+      // Act
+      const errors = validateConfig(validConfig);
 
-    it('should error on empty document ID', () => {
-      const errors = validateConfig({
-        docId: '   ',
-        user: { name: 'Test User' }
-      })
+      // Assert
+      expect(errors).toEqual([]);
+    });
 
-      expect(errors).toContain('Document ID cannot be empty')
-    })
+    it("should reject empty document ID", () => {
+      // Arrange
+      const configWithEmptyDocId = {
+        docId: "   ",
+        user: { name: "Test User" },
+      };
 
-    it('should error on empty user name', () => {
-      const errors = validateConfig({
-        docId: 'test-doc',
-        user: { name: '   ' }
-      })
+      // Act
+      const errors = validateConfig(configWithEmptyDocId);
 
-      expect(errors).toContain('User name cannot be empty')
-    })
+      // Assert
+      expect(errors).toContain("Document ID cannot be empty");
+    });
 
-    it('should error on invalid direct peers count', () => {
-      const errors = validateConfig({
-        docId: 'test-doc',
-        user: { name: 'Test User' },
-        maxDirectPeers: -1  // Negative number
-      })
+    it("should reject empty user name", () => {
+      // Arrange
+      const configWithEmptyUserName = {
+        docId: "test-doc",
+        user: { name: "   " },
+      };
 
-      expect(errors).toContain('Max direct peers must be between 1 and 20')
-    })
+      // Act
+      const errors = validateConfig(configWithEmptyUserName);
 
-    it('should error on too many direct peers', () => {
-      const errors = validateConfig({
-        docId: 'test-doc',
-        user: { name: 'Test User' },
-        maxDirectPeers: 100
-      })
+      // Assert
+      expect(errors).toContain("User name cannot be empty");
+    });
 
-      expect(errors.length).toBeGreaterThan(0)
-      expect(errors[0]).toContain('Max direct peers must be between')
-    })
+    it("should reject negative peer count", () => {
+      // Arrange
+      const configWithNegativePeers = {
+        docId: "test-doc",
+        user: { name: "Test User" },
+        maxDirectPeers: -1,
+      };
 
-    it('should error on sync interval too low', () => {
-      const errors = validateConfig({
-        docId: 'test-doc',
-        user: { name: 'Test User' },
-        syncIntervalMs: 500
-      })
+      // Act
+      const errors = validateConfig(configWithNegativePeers);
 
-      expect(errors.length).toBeGreaterThan(0)
-      expect(errors[0]).toContain('Sync interval must be at least')
-    })
+      // Assert
+      expect(errors).toContain("Max direct peers must be between 1 and 20");
+    });
 
-    it('should return multiple errors when multiple issues exist', () => {
-      const errors = validateConfig({
-        docId: '   ',  // Empty when trimmed
-        user: { name: '   ' },  // Empty when trimmed
-        maxDirectPeers: -5,  // Negative (invalid)
-        syncIntervalMs: 100  // Too low
-      })
+    it("should reject excessive peer count", () => {
+      // Arrange
+      const configWithTooManyPeers = {
+        docId: "test-doc",
+        user: { name: "Test User" },
+        maxDirectPeers: 100,
+      };
 
-      expect(errors.length).toBeGreaterThanOrEqual(2)
-      expect(errors).toContain('Document ID cannot be empty')
-      expect(errors).toContain('User name cannot be empty')
-    })
-  })
+      // Act
+      const errors = validateConfig(configWithTooManyPeers);
 
-  describe('generateUserId', () => {
-    it('should generate a valid user ID', () => {
-      const userId = generateUserId()
-      
-      expect(userId).toBeDefined()
-      expect(typeof userId).toBe('string')
-      expect(userId).toMatch(/^user-\d+-[a-z0-9]+$/)
-    })
+      // Assert
+      expect(errors.some((e) => e.includes("Max direct peers"))).toBe(true);
+    });
 
-    it('should generate unique IDs', () => {
-      const id1 = generateUserId()
-      const id2 = generateUserId()
-      
-      expect(id1).not.toBe(id2)
-    })
+    it("should reject sync interval below minimum", () => {
+      // Arrange
+      const configWithLowInterval = {
+        docId: "test-doc",
+        user: { name: "Test User" },
+        syncIntervalMs: 500,
+      };
 
-    it('should start with "user-" prefix', () => {
-      const userId = generateUserId()
-      expect(userId).toMatch(/^user-/)
-    })
-  })
+      // Act
+      const errors = validateConfig(configWithLowInterval);
 
-  describe('DEFAULT_DATABASE_PATHS', () => {
-    it('should have nested structure', () => {
-      expect(DEFAULT_DATABASE_PATHS.structure).toBe('nested')
-    })
+      // Assert
+      expect(errors.some((e) => e.includes("Sync interval"))).toBe(true);
+    });
 
-    it('should have all required nested subPaths', () => {
-      expect(DEFAULT_DATABASE_PATHS.nested).toBeDefined()
-      expect(DEFAULT_DATABASE_PATHS.nested?.subPaths).toHaveProperty('documents')
-      expect(DEFAULT_DATABASE_PATHS.nested?.subPaths).toHaveProperty('rooms')
-      expect(DEFAULT_DATABASE_PATHS.nested?.subPaths).toHaveProperty('snapshots')
-      expect(DEFAULT_DATABASE_PATHS.nested?.subPaths).toHaveProperty('signaling')
-    })
+    it("should return all errors when multiple issues exist", () => {
+      // Arrange
+      const invalidConfig = {
+        docId: "   ",
+        user: { name: "   " },
+        maxDirectPeers: -5,
+        syncIntervalMs: 100,
+      };
 
-    it('should have basePath defined', () => {
-      expect(DEFAULT_DATABASE_PATHS.nested?.basePath).toBe('/documents')
-    })
-  })
+      // Act
+      const errors = validateConfig(invalidConfig);
 
-  describe('DEFAULT_CONFIG', () => {
-    it('should have sensible defaults', () => {
-      expect(DEFAULT_CONFIG.docId).toBe('default-doc')
-      expect(DEFAULT_CONFIG.user.name).toBe('Anonymous User')
-      expect(DEFAULT_CONFIG.maxDirectPeers).toBeGreaterThan(0)
-      expect(DEFAULT_CONFIG.syncIntervalMs).toBeGreaterThan(0)
-      expect(DEFAULT_CONFIG.autoReconnect).toBe(true)
-    })
+      // Assert
+      expect(errors.length).toBeGreaterThanOrEqual(2);
+    });
+  });
 
-    it('should have connection settings', () => {
-      expect(DEFAULT_CONFIG.connectionTimeout).toBeGreaterThan(0)
-      expect(DEFAULT_CONFIG.heartbeatInterval).toBeGreaterThan(0)
-    })
+  describe("generateUserId", () => {
+    it("should return a non-empty string", () => {
+      // Act
+      const userId = generateUserId();
 
-    it('should have UI settings', () => {
-      expect(DEFAULT_CONFIG.placeholder).toBeDefined()
-      expect(typeof DEFAULT_CONFIG.showConnectionStatus).toBe('boolean')
-      expect(typeof DEFAULT_CONFIG.showPeerCount).toBe('boolean')
-    })
-  })
-})
+      // Assert
+      expect(userId.length).toBeGreaterThan(0);
+    });
 
+    it("should return different IDs on successive calls", () => {
+      // Act
+      const id1 = generateUserId();
+      const id2 = generateUserId();
+
+      // Assert
+      expect(id1).not.toBe(id2);
+    });
+
+    it("should start with user prefix", () => {
+      // Act
+      const userId = generateUserId();
+
+      // Assert
+      expect(userId).toMatch(/^user-/);
+    });
+
+    it("should include timestamp component", () => {
+      // Arrange
+      const beforeTime = Date.now();
+
+      // Act
+      const userId = generateUserId();
+      const timestamp = parseInt(userId.split("-")[1]);
+      const afterTime = Date.now();
+
+      // Assert
+      expect(timestamp).toBeGreaterThanOrEqual(beforeTime);
+      expect(timestamp).toBeLessThanOrEqual(afterTime);
+    });
+  });
+
+  describe("DEFAULT_DATABASE_PATHS", () => {
+    it("should use nested structure", () => {
+      // Assert
+      expect(DEFAULT_DATABASE_PATHS.structure).toBe("nested");
+    });
+
+    it("should define documents subpath", () => {
+      // Assert
+      expect(DEFAULT_DATABASE_PATHS.nested?.subPaths).toHaveProperty(
+        "documents"
+      );
+    });
+
+    it("should define rooms subpath", () => {
+      // Assert
+      expect(DEFAULT_DATABASE_PATHS.nested?.subPaths).toHaveProperty("rooms");
+    });
+
+    it("should define snapshots subpath", () => {
+      // Assert
+      expect(DEFAULT_DATABASE_PATHS.nested?.subPaths).toHaveProperty(
+        "snapshots"
+      );
+    });
+
+    it("should define signaling subpath", () => {
+      // Assert
+      expect(DEFAULT_DATABASE_PATHS.nested?.subPaths).toHaveProperty(
+        "signaling"
+      );
+    });
+
+    it("should use /documents as base path", () => {
+      // Assert
+      expect(DEFAULT_DATABASE_PATHS.nested?.basePath).toBe("/documents");
+    });
+  });
+
+  describe("DEFAULT_CONFIG", () => {
+    it("should have auto-reconnect enabled", () => {
+      // Assert
+      expect(DEFAULT_CONFIG.autoReconnect).toBe(true);
+    });
+
+    it("should have positive connection timeout", () => {
+      // Assert
+      expect(DEFAULT_CONFIG.connectionTimeout).toBeGreaterThan(0);
+    });
+
+    it("should have positive heartbeat interval", () => {
+      // Assert
+      expect(DEFAULT_CONFIG.heartbeatInterval).toBeGreaterThan(0);
+    });
+
+    it("should have valid default peer count", () => {
+      // Assert
+      expect(DEFAULT_CONFIG.maxDirectPeers).toBeGreaterThan(0);
+    });
+
+    it("should have positive sync interval", () => {
+      // Assert
+      expect(DEFAULT_CONFIG.syncIntervalMs).toBeGreaterThan(0);
+    });
+  });
+});
