@@ -47,7 +47,7 @@ export default function CollaborativeEditor({
           provider: { awareness: adapter.awareness },
           user: {
             name: userName,
-            color: userColor || adapter.getUserInfo().color,
+            color: userColor || `#${Math.floor(Math.random()*16777215).toString(16)}`,
           },
         }),
       ] : []),
@@ -75,7 +75,7 @@ export default function CollaborativeEditor({
         handle = await createFirebaseYWebrtcAdapter({ 
           docId,
           firebaseDatabase: rtdb, // Add required Firebase database instance
-          user: { name: userName, color: userColor },
+          user: { name: userName },
           syncIntervalMs: 15000, // 15 second sync interval
           maxDirectPeers: 6, // Reasonable cluster size
           databasePaths: {

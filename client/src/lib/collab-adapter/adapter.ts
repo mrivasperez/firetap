@@ -1,6 +1,5 @@
 import * as Y from 'yjs'
 import { Awareness } from 'y-protocols/awareness'
-import SimplePeer from 'simple-peer'
 import { startPeriodicPersistence, loadDocumentFromFirebase } from './persistence'
 import { announcePresence, stopAnnouncingPresence, cleanupStalePeers, type PeerInfo } from './cluster'
 import type { Database } from 'firebase/database'
@@ -82,8 +81,8 @@ export type AdapterHandle = {
 }
 
 type SignalData = {
-  type: 'offer' | 'answer' | 'signal'
-  signal: unknown
+  type: 'offer' | 'answer'
+  sdp?: RTCSessionDescriptionInit
   from: string
   to: string
   timestamp: number
@@ -97,8 +96,8 @@ class SimplePeerManager {
   private databasePaths: DatabasePathsConfig
   private rtdb: Database
   private eventListeners: Map<keyof AdapterEvents, Set<(data: AdapterEvents[keyof AdapterEvents]) => void>> = new Map()
-  private cleanupInterval: NodeJS.Timeout | null = null
-  private heartbeatInterval: NodeJS.Timeout | null = null
+  private cleanupInterval: ReturnType<typeof setInterval> | null = null
+  private heartbeatInterval: ReturnType<typeof setInterval> | null = null
   private beforeUnloadHandler: (() => void) | null = null
   private visibilityChangeHandler: (() => void) | null = null
   private connectionTimestamps = new Map<string, number>()
@@ -144,7 +143,11 @@ class SimplePeerManager {
       throw error
     }
   }
-  private peers = new Map<string, SimplePeer.Instance>()
+
+  // WebRTC peer connections
+  private peers = new Map<string, RTCPeerConnection>()
+  private dataChannels = new Map<string, RTCDataChannel>()
+  
   private signalingRef: ReturnType<typeof ref> | null = null
   private connectionStatus: 'connecting' | 'connected' | 'disconnected' = 'connecting'
   private peersRef: ReturnType<typeof ref> | null = null
@@ -175,10 +178,13 @@ class SimplePeerManager {
 
     // Set up signaling listener
     this.signalingRef = ref(this.rtdb, `${this.getPaths().signaling}/${this.peerId}`)
+    console.log(`Setting up signaling listener at: ${this.getPaths().signaling}/${this.peerId}`)
     onValue(this.signalingRef, (snapshot) => {
       if (snapshot.exists() && !this.isDestroyed) {
         const signals = snapshot.val()
         const signalKeys = Object.keys(signals)
+        
+        console.log(`Received ${signalKeys.length} signals:`, signalKeys.map(k => signals[k].type))
         
         // Process all signals first
         signalKeys.forEach(key => {
@@ -218,12 +224,10 @@ class SimplePeerManager {
         })
         
         // Clean up our own connections to peers that are no longer present
-        this.peers.forEach((peer, peerId) => {
+        this.peers.forEach((_peer, peerId) => {
           if (!currentPeerIds.includes(peerId)) {
             console.log(`Removing connection to peer ${peerId} (no longer in presence)`)
-            peer.destroy()
-            this.peers.delete(peerId)
-            this.connectionTimestamps.delete(peerId)
+            this.cleanupPeerConnection(peerId)
           }
         })
       }
@@ -258,33 +262,120 @@ class SimplePeerManager {
       return
     }
     
-    const peer = new SimplePeer({
-      initiator,
-      trickle: false,
-      config: {
-        iceServers: STUN_SERVERS
+    // Create RTCPeerConnection with STUN servers
+    const peerConnection = new RTCPeerConnection({
+      iceServers: STUN_SERVERS
+    })
+
+    // Store the peer connection
+    this.peers.set(otherPeerId, peerConnection)
+
+    // Handle ICE candidates - using non-trickle ICE for cost optimization
+    // All candidates will be bundled in the SDP, so we don't need to send them separately
+    peerConnection.onicecandidate = (event) => {
+      if (event.candidate) {
+        // With non-trickle ICE, candidates are automatically included in the SDP
+        // No need to send them separately - this saves Firebase write costs
+        console.log(`ICE candidate generated for ${otherPeerId} (will be bundled in SDP)`)
+      } else {
+        // null candidate means ICE gathering is complete
+        console.log(`ICE gathering complete for ${otherPeerId}`)
       }
-    })
+    }
 
-    peer.on('signal', (data) => {
-      // Send signal through Firebase
-      this.sendSignal(otherPeerId, data)
-    })
-
-    peer.on('connect', () => {
-      console.log(`Peer ${otherPeerId} connected`)
-      this.connectionTimestamps.set(otherPeerId, Date.now())
-      this.emit('peer-joined', { peerId: otherPeerId, user: { id: otherPeerId, name: `User-${otherPeerId.slice(0, PEER_ID_DISPLAY_LENGTH)}`, connectedAt: Date.now() } })
+    // Handle connection state changes
+    peerConnection.onconnectionstatechange = () => {
+      const state = peerConnection.connectionState
+      console.log(`Peer ${otherPeerId} connection state: ${state}`)
       
-      // Send current document state
-      const update = Y.encodeStateAsUpdate(this.ydoc)
-      peer.send(JSON.stringify({ type: 'sync', update: Array.from(update) }))
-    })
+      if (state === 'connected') {
+        console.log(`Peer ${otherPeerId} connected`)
+        this.connectionTimestamps.set(otherPeerId, Date.now())
+        this.emit('peer-joined', { 
+          peerId: otherPeerId, 
+          user: { 
+            id: otherPeerId, 
+            name: `User-${otherPeerId.slice(0, PEER_ID_DISPLAY_LENGTH)}`, 
+            connectedAt: Date.now() 
+          } 
+        })
+        
+        // Send current document state through data channel
+        const dataChannel = this.dataChannels.get(otherPeerId)
+        if (dataChannel && dataChannel.readyState === 'open') {
+          const update = Y.encodeStateAsUpdate(this.ydoc)
+          dataChannel.send(JSON.stringify({ type: 'sync', update: Array.from(update) }))
+        }
+      } else if (state === 'failed' || state === 'disconnected' || state === 'closed') {
+        console.log(`Peer ${otherPeerId} ${state}`)
+        this.cleanupPeerConnection(otherPeerId)
+      }
+    }
 
-    peer.on('data', (data) => {
+    // Handle data channel
+    if (initiator) {
+      // Create data channel as initiator
+      console.log(`Creating data channel and offer for peer ${otherPeerId} (I am initiator)`)
+      const dataChannel = peerConnection.createDataChannel('data')
+      this.dataChannels.set(otherPeerId, dataChannel)
+      this.setupDataChannel(otherPeerId, dataChannel)
+      
+      // Create offer and wait for ICE gathering to complete (non-trickle ICE)
+      peerConnection.createOffer()
+        .then(offer => {
+          console.log(`Created offer for ${otherPeerId}, setting local description`)
+          return peerConnection.setLocalDescription(offer)
+        })
+        .then(() => {
+          // Wait for ICE gathering to complete before sending
+          return new Promise<void>((resolve) => {
+            if (peerConnection.iceGatheringState === 'complete') {
+              resolve()
+            } else {
+              const checkGathering = () => {
+                if (peerConnection.iceGatheringState === 'complete') {
+                  peerConnection.removeEventListener('icegatheringstatechange', checkGathering)
+                  resolve()
+                }
+              }
+              peerConnection.addEventListener('icegatheringstatechange', checkGathering)
+            }
+          })
+        })
+        .then(() => {
+          if (peerConnection.localDescription) {
+            console.log(`ICE gathering complete, sending offer to ${otherPeerId}`)
+            return this.sendOffer(otherPeerId, peerConnection.localDescription)
+          }
+        })
+        .then(() => {
+          console.log(`Offer sent successfully to ${otherPeerId}`)
+        })
+        .catch(error => {
+          console.error(`Error creating offer for ${otherPeerId}:`, error)
+          this.cleanupPeerConnection(otherPeerId)
+        })
+    } else {
+      console.log(`Waiting for offer from peer ${otherPeerId} (they are initiator)`)
+      // Handle incoming data channel as receiver
+      peerConnection.ondatachannel = (event) => {
+        console.log(`Received data channel from ${otherPeerId}`)
+        const dataChannel = event.channel
+        this.dataChannels.set(otherPeerId, dataChannel)
+        this.setupDataChannel(otherPeerId, dataChannel)
+      }
+    }
+  }
+
+  private setupDataChannel(peerId: string, dataChannel: RTCDataChannel): void {
+    dataChannel.onopen = () => {
+      console.log(`Data channel opened for peer ${peerId}`)
+    }
+
+    dataChannel.onmessage = (event) => {
       try {
-        const message = JSON.parse(data.toString())
-        const messageSize = data.length
+        const message = JSON.parse(event.data)
+        const messageSize = event.data.length
         
         // Track message buffer for memory monitoring
         this.trackMessage(messageSize)
@@ -293,7 +384,7 @@ class SimplePeerManager {
           Y.applyUpdate(this.ydoc, new Uint8Array(message.update))
         } else if (message.type === 'awareness' && message.update) {
           // Apply awareness updates from peer with size limit check
-          if (this.awareness.getStates().size < MAX_AWARENESS_STATES) { // Limit awareness states
+          if (this.awareness.getStates().size < MAX_AWARENESS_STATES) {
             const awarenessUpdate = new Uint8Array(message.update)
             applyAwarenessUpdate(this.awareness, awarenessUpdate, null)
           }
@@ -301,80 +392,169 @@ class SimplePeerManager {
       } catch (error) {
         console.error('Error parsing peer data:', error)
       }
-    })
+    }
 
-    peer.on('error', (error) => {
-      console.error(`Peer connection error with ${otherPeerId}:`, error)
-      this.cleanupPeerConnection(otherPeerId)
-    })
+    dataChannel.onerror = (error) => {
+      console.error(`Data channel error for peer ${peerId}:`, error)
+    }
 
-    peer.on('close', () => {
-      console.log(`Peer ${otherPeerId} disconnected`)
-      this.cleanupPeerConnection(otherPeerId)
-    })
-
-    this.peers.set(otherPeerId, peer)
+    dataChannel.onclose = () => {
+      console.log(`Data channel closed for peer ${peerId}`)
+    }
   }
 
-  private async sendSignal(targetPeerId: string, signal: unknown): Promise<void> {
+  private async sendOffer(targetPeerId: string, offer: RTCSessionDescriptionInit): Promise<void> {
     const signalData: SignalData = {
-      type: 'signal',
-      signal,
+      type: 'offer',
+      sdp: {
+        type: offer.type!,
+        sdp: offer.sdp!
+      },
       from: this.peerId,
       to: targetPeerId,
       timestamp: Date.now()
     }
     
-    // Push signal to target peer's signaling path
+    console.log(`Pushing offer to Firebase path: ${this.getPaths().signaling}/${targetPeerId}`, signalData)
     const messageRef = push(ref(this.rtdb, `${this.getPaths().signaling}/${targetPeerId}`))
     await set(messageRef, signalData)
+    console.log(`Offer successfully written to Firebase for ${targetPeerId}`)
+  }
+
+  private async sendAnswer(targetPeerId: string, answer: RTCSessionDescriptionInit): Promise<void> {
+    const signalData: SignalData = {
+      type: 'answer',
+      sdp: {
+        type: answer.type!,
+        sdp: answer.sdp!
+      },
+      from: this.peerId,
+      to: targetPeerId,
+      timestamp: Date.now()
+    }
+    
+    console.log(`Sending answer to ${targetPeerId}`)
+    const messageRef = push(ref(this.rtdb, `${this.getPaths().signaling}/${targetPeerId}`))
+    await set(messageRef, signalData)
+    console.log(`Answer successfully written to Firebase for ${targetPeerId}`)
   }
 
   private handleSignalData(signalData: SignalData): void {
-    const { from, signal } = signalData
-    const peer = this.peers.get(from)
+    const { from, type } = signalData
+    let peer = this.peers.get(from)
     
-    if (peer) {
-      try {
-        peer.signal(signal as SimplePeer.SignalData)
-      } catch (error) {
-        console.error(`Error signaling peer ${from}:`, error)
-      }
-    } else {
-      // Create peer connection for incoming signal
+    if (!peer && type === 'offer') {
+      // Create peer connection for incoming offer
+      console.log(`Received offer from ${from}, creating peer connection`)
       this.createPeerConnection(from, false)
-      // Apply the signal immediately after peer creation
-      const newPeer = this.peers.get(from)
-      if (newPeer) {
-        try {
-          newPeer.signal(signal as SimplePeer.SignalData)
-        } catch (error) {
-          console.error(`Error signaling new peer ${from}:`, error)
-        }
+      peer = this.peers.get(from)
+      
+      if (!peer) {
+        console.error(`Failed to create peer connection for ${from}`)
+        return
       }
+      
+      // Immediately handle the offer after creating the peer
+      console.log(`Set remote description from offer for ${from}`)
+      peer.setRemoteDescription(new RTCSessionDescription(signalData.sdp!))
+        .then(() => {
+          console.log(`Set remote description for ${from}, creating answer`)
+          return peer!.createAnswer()
+        })
+        .then(answer => {
+          console.log(`Created answer for ${from}, setting local description`)
+          return peer!.setLocalDescription(answer)
+        })
+        .then(() => {
+          // Wait for ICE gathering to complete before sending answer (non-trickle ICE)
+          return new Promise<void>((resolve) => {
+            if (peer!.iceGatheringState === 'complete') {
+              resolve()
+            } else {
+              const checkGathering = () => {
+                if (peer!.iceGatheringState === 'complete') {
+                  peer!.removeEventListener('icegatheringstatechange', checkGathering)
+                  resolve()
+                }
+              }
+              peer!.addEventListener('icegatheringstatechange', checkGathering)
+            }
+          })
+        })
+        .then(() => {
+          if (peer!.localDescription) {
+            console.log(`ICE gathering complete, sending answer to ${from}`)
+            return this.sendAnswer(from, peer!.localDescription)
+          }
+        })
+        .then(() => {
+          console.log(`Answer sent successfully to ${from}`)
+        })
+        .catch(error => {
+          console.error(`Error handling offer from ${from}:`, error)
+          this.cleanupPeerConnection(from)
+        })
+      return
+    }
+
+    if (!peer) {
+      // With non-trickle ICE, we don't handle separate ICE candidates
+      // They're bundled in the SDP, so we only need to warn about unexpected signals
+      console.warn(`No peer connection found for ${from}, signal type: ${type}`)
+      return
+    }
+
+    try {
+      if (type === 'offer' && signalData.sdp) {
+        // This shouldn't happen since we handle offers above, but just in case
+        console.warn(`Received duplicate offer from ${from}, ignoring`)
+      } else if (type === 'answer' && signalData.sdp) {
+        // Handle incoming answer
+        console.log(`Received answer from ${from}`)
+        peer.setRemoteDescription(new RTCSessionDescription(signalData.sdp))
+          .then(() => {
+            console.log(`Set remote description from answer for ${from}`)
+          })
+          .catch(error => {
+            console.error(`Error handling answer from ${from}:`, error)
+            this.cleanupPeerConnection(from)
+          })
+      }
+    } catch (error) {
+      console.error(`Error processing signal from ${from}:`, error)
     }
   }
 
   broadcastUpdate(update: Uint8Array): void {
     const message = JSON.stringify({ type: 'sync', update: Array.from(update) })
-    this.peers.forEach(peer => {
-      if (peer.connected) {
-        peer.send(message)
+    this.dataChannels.forEach((dataChannel, peerId) => {
+      if (dataChannel.readyState === 'open') {
+        try {
+          dataChannel.send(message)
+        } catch (error) {
+          console.error(`Error sending update to peer ${peerId}:`, error)
+        }
       }
     })
   }
 
   broadcastAwareness(update: Uint8Array): void {
     const message = JSON.stringify({ type: 'awareness', update: Array.from(update) })
-    this.peers.forEach(peer => {
-      if (peer.connected) {
-        peer.send(message)
+    this.dataChannels.forEach((dataChannel, peerId) => {
+      if (dataChannel.readyState === 'open') {
+        try {
+          dataChannel.send(message)
+        } catch (error) {
+          console.error(`Error sending awareness to peer ${peerId}:`, error)
+        }
       }
     })
   }
 
   getPeerCount(): number {
-    return Array.from(this.peers.values()).filter(peer => peer.connected).length
+    return Array.from(this.peers.values()).filter(peer => 
+      peer.connectionState === 'connected'
+    ).length
   }
 
   getConnectionStatus(): 'connecting' | 'connected' | 'disconnected' {
@@ -405,9 +585,10 @@ class SimplePeerManager {
     const idleTimeout = IDLE_PEER_TIMEOUT_MS
     
     this.peers.forEach((peer, peerId) => {
-      if (!peer.connected && (now - this.memoryStats.lastCleanup) > idleTimeout) {
-        peer.destroy()
+      if (peer.connectionState !== 'connected' && (now - this.memoryStats.lastCleanup) > idleTimeout) {
+        peer.close()
         this.peers.delete(peerId)
+        this.dataChannels.delete(peerId)
       }
     })
     
@@ -425,20 +606,18 @@ class SimplePeerManager {
       this.memoryStats.messageBuffer = this.messageBuffer.reduce((sum, msg) => sum + msg.size, 0)
     }
     
-    // Clean up awareness states if too many
-    const awarenessStates = this.awareness.getStates()
-    if (awarenessStates.size > MAX_AWARENESS_STATES) {
-      console.warn('Too many awareness states, cleaning up old ones')
-      // Remove stale awareness states (keep only connected peers)
-      const connectedPeerIds = new Set(Array.from(this.peers.keys()).filter(id => {
-        const peer = this.peers.get(id)
-        return peer && peer.connected
-      }))
-      connectedPeerIds.add(this.peerId)
-      
-      // Remove states for disconnected peers
+      // Clean up awareness states if too many
+      const awarenessStates = this.awareness.getStates()
+      if (awarenessStates.size > MAX_AWARENESS_STATES) {
+        console.warn('Too many awareness states, cleaning up old ones')
+        // Remove stale awareness states (keep only connected peers)
+        const connectedPeerIds = new Set(Array.from(this.peers.keys()).filter(id => {
+          const peer = this.peers.get(id)
+          return peer && peer.connectionState === 'connected'
+        }))
+        connectedPeerIds.add(this.peerId)      // Remove states for disconnected peers
       const clientsToRemove: number[] = []
-      awarenessStates.forEach((_state, clientId) => {
+      awarenessStates.forEach((_state: unknown, clientId: number) => {
         if (!connectedPeerIds.has(String(clientId)) && clientId !== this.ydoc.clientID) {
           clientsToRemove.push(clientId)
         }
@@ -464,12 +643,23 @@ class SimplePeerManager {
     const peer = this.peers.get(peerId)
     if (peer) {
       try {
-        peer.destroy()
+        peer.close()
       } catch (e) {
-        console.warn(`Error destroying peer ${peerId}:`, e)
+        console.warn(`Error closing peer ${peerId}:`, e)
       }
       this.peers.delete(peerId)
     }
+    
+    const dataChannel = this.dataChannels.get(peerId)
+    if (dataChannel) {
+      try {
+        dataChannel.close()
+      } catch (e) {
+        console.warn(`Error closing data channel for ${peerId}:`, e)
+      }
+      this.dataChannels.delete(peerId)
+    }
+    
     this.connectionTimestamps.delete(peerId)
     this.emit('peer-left', { peerId })
   }
@@ -539,12 +729,8 @@ class SimplePeerManager {
       try {
         const paths = this.getPaths()
         const peerRef = ref(this.rtdb, `${paths.rooms}/peers/${this.peerId}`)
-        // Use sendBeacon for reliable cleanup on page unload
-        if (navigator.sendBeacon) {
-          const cleanupData = JSON.stringify({ action: 'cleanup', peerId: this.peerId })
-          navigator.sendBeacon('/cleanup', cleanupData) // This would need server support
-        }
-        // Fallback: direct Firebase cleanup (may not complete)
+        // Firebase's onDisconnect() handles cleanup automatically
+        // Just attempt direct cleanup as best effort
         remove(peerRef)
       } catch (error) {
         console.warn('Error in beforeunload cleanup:', error)
@@ -608,7 +794,9 @@ class SimplePeerManager {
 
   private async checkAndReconnectPeers(): Promise<void> {
     // Check if we have active peer connections
-    const connectedPeers = Array.from(this.peers.values()).filter(p => p.connected).length
+    const connectedPeers = Array.from(this.peers.values()).filter(p => 
+      p.connectionState === 'connected'
+    ).length
     
     if (connectedPeers === 0 && this.peers.size > 0) {
       // We have peer objects but none are connected - clean up and reconnect
@@ -616,14 +804,12 @@ class SimplePeerManager {
       
       // Clean up stale connections
       this.peers.forEach((peer, peerId) => {
-        if (!peer.connected) {
+        if (peer.connectionState !== 'connected') {
           try {
-            peer.destroy()
+            this.cleanupPeerConnection(peerId)
           } catch {
             // Ignore errors during cleanup
           }
-          this.peers.delete(peerId)
-          this.connectionTimestamps.delete(peerId)
         }
       })
       
@@ -644,14 +830,24 @@ class SimplePeerManager {
     this.performMemoryCleanup()
     
     // Close all peer connections
-    this.peers.forEach(peer => {
+    this.peers.forEach((peer) => {
       try {
-        peer.destroy()
+        peer.close()
       } catch (e) {
-        console.warn('Error destroying peer:', e)
+        console.warn('Error closing peer:', e)
       }
     })
     this.peers.clear()
+    
+    // Close all data channels
+    this.dataChannels.forEach(dataChannel => {
+      try {
+        dataChannel.close()
+      } catch (e) {
+        console.warn('Error closing data channel:', e)
+      }
+    })
+    this.dataChannels.clear()
 
     // Remove Firebase listeners
     if (this.signalingRef) {
