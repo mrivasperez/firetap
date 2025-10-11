@@ -7,7 +7,7 @@ import { buildDatabasePaths, type DatabasePathsConfig } from '../utils/config'
 // ============================================================================
 
 // Peer Presence Configuration
-const STALE_PEER_THRESHOLD_MS = 240_000 // 4 minutes - consider peer stale after this time (aligned with heartbeat optimization)
+const STALE_PEER_THRESHOLD_MS = 600_000 // 10 minutes - consider peer stale after this time (aligned with heartbeat optimization)
 const MILLISECONDS_TO_SECONDS = 1_000 // Conversion factor for time display
 
 export type PeerInfo = {

@@ -26,9 +26,10 @@ const MAX_AWARENESS_STATES = 50 // Maximum number of awareness states before cle
 
 // Cleanup & Heartbeat Intervals
 const CLEANUP_INTERVAL_MS = 60_000 // 60 seconds - interval for periodic cleanup
-const HEARTBEAT_INTERVAL_MS = 90_000 // 90 seconds - interval for presence heartbeat (optimized for cost savings)
-const STALE_CONNECTION_TIMEOUT_MS = 240_000 // 4 minutes - timeout for stale connections
+const HEARTBEAT_INTERVAL_MS = 300_000 // 5 minutes - interval for presence heartbeat (optimized for cost savings)
+const STALE_CONNECTION_TIMEOUT_MS = 600_000 // 10 minutes - timeout for stale connections
 const MEMORY_CHECK_INTERVAL_MS = 300_000 // 5 minutes - interval for memory monitoring
+const MIN_VISIBILITY_UPDATE_INTERVAL = 120_000 // 2 minutes - throttle for visibility change updates
 
 // Default Configuration
 const DEFAULT_SYNC_INTERVAL_MS = 15_000 // 15 seconds - default document sync interval
@@ -699,7 +700,12 @@ class SimplePeerManager {
     if (this.heartbeatInterval) {
       clearInterval(this.heartbeatInterval)
     }
-    this.heartbeatInterval = setInterval(async () => {
+    
+    // Track last visibility update time for throttling
+    let lastVisibilityUpdate = 0
+    
+    // Helper function to update presence
+    const updatePresence = async () => {
       if (this.isDestroyed) return
       
       try {
@@ -711,17 +717,36 @@ class SimplePeerManager {
         const { onDisconnect } = await import('firebase/database')
         await onDisconnect(peerRef).remove()
         
+        // Reduced payload: only id and lastSeen (removed name and connectedAt for cost savings)
         const currentData = {
           id: this.peerId,
-          name: `User-${this.peerId.slice(0, PEER_ID_DISPLAY_LENGTH)}`,
-          connectedAt: Date.now(),
           lastSeen: Date.now()
         }
         await set(peerRef, currentData)
       } catch (error) {
         console.warn('Failed to update heartbeat:', error)
       }
-    }, HEARTBEAT_INTERVAL_MS) // Every 60 seconds (reduced from 15s for cost optimization)
+    }
+    
+    // Set up timer-based heartbeat (every 5 minutes)
+    this.heartbeatInterval = setInterval(updatePresence, HEARTBEAT_INTERVAL_MS)
+    
+    // Set up throttled visibility change handler
+    if (typeof document !== 'undefined') {
+      this.visibilityChangeHandler = () => {
+        const now = Date.now()
+        // Only update if tab becomes visible AND throttle period has passed
+        if (!document.hidden && (now - lastVisibilityUpdate) > MIN_VISIBILITY_UPDATE_INTERVAL) {
+          lastVisibilityUpdate = now
+          updatePresence()
+        }
+      }
+      
+      document.addEventListener('visibilitychange', this.visibilityChangeHandler)
+    }
+    
+    // Send initial presence update immediately
+    updatePresence()
   }
 
   private persistDocumentSync: (() => void) | null = null
@@ -882,9 +907,11 @@ class SimplePeerManager {
         window.removeEventListener('beforeunload', this.beforeUnloadHandler)
         window.removeEventListener('pagehide', this.beforeUnloadHandler)
       }
-      if (this.visibilityChangeHandler) {
-        window.removeEventListener('visibilitychange', this.visibilityChangeHandler)
-      }
+    }
+    
+    if (typeof document !== 'undefined' && this.visibilityChangeHandler) {
+      document.removeEventListener('visibilitychange', this.visibilityChangeHandler)
+      this.visibilityChangeHandler = null
     }
 
     // Clear memory tracking
