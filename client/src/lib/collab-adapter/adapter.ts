@@ -31,7 +31,7 @@ import {
 
 // Peer Connection Configuration
 const DEFAULT_MAX_DIRECT_PEERS = 20; // Maximum number of WebRTC peer connections
-const PEER_PRESENCE_TIMEOUT_MS = 180_000; // 180 seconds - consider peer stale if not seen (2x heartbeat)
+const PEER_PRESENCE_TIMEOUT_MS = 600_000; // 10 minutes - consider peer stale if not seen (2x heartbeat)
 const PEER_ID_DISPLAY_LENGTH = 6; // Number of characters to show in peer ID
 
 // Memory Management
@@ -42,7 +42,7 @@ const MAX_MEMORY_BUFFER_BYTES = 10 * 1024 * 1024; // 10MB - max message buffer s
 const MAX_AWARENESS_STATES = 50; // Maximum number of awareness states before cleanup
 
 // Cleanup & Heartbeat Intervals
-const CLEANUP_INTERVAL_MS = 60_000; // 60 seconds - interval for periodic cleanup
+const CLEANUP_INTERVAL_MS = 300_000; // 5 minutes - interval for periodic cleanup
 const HEARTBEAT_INTERVAL_MS = 300_000; // 5 minutes - interval for presence heartbeat (optimized for cost savings)
 const STALE_CONNECTION_TIMEOUT_MS = 600_000; // 10 minutes - timeout for stale connections
 const MEMORY_CHECK_INTERVAL_MS = 300_000; // 5 minutes - interval for memory monitoring
