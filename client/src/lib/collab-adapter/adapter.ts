@@ -663,6 +663,12 @@ class SimplePeerManager {
     }
     
     this.connectionTimestamps.delete(peerId)
+    
+    // Remove peer from Firebase presence immediately (WebRTC-based stale detection)
+    // This provides instant cleanup when WebRTC detects disconnection/failure
+    stopAnnouncingPresence(this.rtdb, this.docId, peerId, this.databasePaths)
+      .catch(error => console.warn(`Failed to remove presence for ${peerId}:`, error))
+    
     this.emit('peer-left', { peerId })
   }
 
