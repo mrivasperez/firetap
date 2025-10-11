@@ -1,6 +1,6 @@
 import type { Database } from 'firebase/database'
 import { ref, set, remove, get, query, orderByChild, endAt } from 'firebase/database'
-import { buildDatabasePaths, type DatabasePathsConfig } from './config'
+import { buildDatabasePaths, type DatabasePathsConfig } from '../utils/config'
 
 // ============================================================================
 // CONSTANTS

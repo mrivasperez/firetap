@@ -1,12 +1,12 @@
 import * as Y from 'yjs'
 import { Awareness } from 'y-protocols/awareness'
-import { startPeriodicPersistence, loadDocumentFromFirebase } from './persistence'
-import { announcePresence, stopAnnouncingPresence, cleanupStalePeers, type PeerInfo } from './cluster'
+import { startPeriodicPersistence, loadDocumentFromFirebase } from './firebase/persistence'
+import { announcePresence, stopAnnouncingPresence, cleanupStalePeers, type PeerInfo } from './firebase/presence'
 import type { Database } from 'firebase/database'
 import { ref, set, remove, onValue, push, off } from 'firebase/database'
 import { encodeAwarenessUpdate, applyAwarenessUpdate, removeAwarenessStates } from 'y-protocols/awareness'
 
-import { type DatabasePathsConfig, buildDatabasePaths, type ConnectionState } from './config'
+import { type DatabasePathsConfig, buildDatabasePaths, type ConnectionState } from './utils/config'
 
 // ============================================================================
 // CONSTANTS

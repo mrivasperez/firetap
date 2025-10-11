@@ -15,12 +15,12 @@ export {
   createAdapterConfig,
   validateConfig,
   generateUserId
-} from './config'
+} from './utils/config'
 export type { 
   DatabasePathsConfig, 
   CollaborationConfig,
   ConnectionState 
-} from './config'
+} from './utils/config'
 
 // Persistence utilities (for advanced users)
 export { 
@@ -28,16 +28,16 @@ export {
   persistDocument,
   createDocumentSnapshot,
   getDocumentVersion
-} from './persistence'
-export type { DocumentSnapshot } from './persistence'
+} from './firebase/persistence'
+export type { DocumentSnapshot } from './firebase/persistence'
 
 // Clustering utilities
-export { announcePresence, stopAnnouncingPresence } from './cluster'
-export type { PeerInfo } from './cluster'
+export { announcePresence, stopAnnouncingPresence } from './firebase/presence'
+export type { PeerInfo } from './firebase/presence'
 
 // Re-export types from config and cluster
-import type { ConnectionState } from './config'
-import type { PeerInfo } from './cluster'
+import type { ConnectionState } from './utils/config'
+import type { PeerInfo } from './firebase/presence'
 
 // Event types for the adapter
 export type AdapterEvents = {

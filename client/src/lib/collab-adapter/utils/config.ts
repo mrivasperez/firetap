@@ -1,4 +1,4 @@
-import { type AdapterOptions } from "./adapter";
+import { type AdapterOptions } from "../adapter";
 
 // ============================================================================
 // CONSTANTS
