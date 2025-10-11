@@ -1,6 +1,6 @@
 import * as Y from 'yjs'
 import { Awareness } from 'y-protocols/awareness'
-import { startPeriodicPersistence, loadDocumentFromFirebase } from './firebase/persistence'
+import { startPeriodicPersistence, loadDocumentFromFirebase, persistDocument } from './firebase/persistence'
 import { announcePresence, stopAnnouncingPresence, cleanupStalePeers, type PeerInfo } from './firebase/presence'
 import type { Database } from 'firebase/database'
 import { ref, set, remove, onValue, push, off } from 'firebase/database'
@@ -14,7 +14,7 @@ import { type DatabasePathsConfig, buildDatabasePaths, type ConnectionState } fr
 
 // Peer Connection Configuration
 const DEFAULT_MAX_DIRECT_PEERS = 20 // Maximum number of WebRTC peer connections
-const PEER_PRESENCE_TIMEOUT_MS = 120_000 // 120 seconds - consider peer stale if not seen (2x heartbeat)
+const PEER_PRESENCE_TIMEOUT_MS = 180_000 // 180 seconds - consider peer stale if not seen (2x heartbeat)
 const PEER_ID_DISPLAY_LENGTH = 6 // Number of characters to show in peer ID
 
 // Memory Management
@@ -26,8 +26,8 @@ const MAX_AWARENESS_STATES = 50 // Maximum number of awareness states before cle
 
 // Cleanup & Heartbeat Intervals
 const CLEANUP_INTERVAL_MS = 60_000 // 60 seconds - interval for periodic cleanup
-const HEARTBEAT_INTERVAL_MS = 60_000 // 60 seconds - interval for presence heartbeat (reduced Firebase writes)
-const STALE_CONNECTION_TIMEOUT_MS = 180_000 // 3 minutes - timeout for stale connections (increased proportionally)
+const HEARTBEAT_INTERVAL_MS = 90_000 // 90 seconds - interval for presence heartbeat (optimized for cost savings)
+const STALE_CONNECTION_TIMEOUT_MS = 240_000 // 4 minutes - timeout for stale connections
 const MEMORY_CHECK_INTERVAL_MS = 300_000 // 5 minutes - interval for memory monitoring
 
 // Default Configuration
@@ -76,6 +76,7 @@ export type AdapterHandle = {
     awarenessStates: number
   }
   forceGarbageCollection: () => void
+  forcePersist: () => Promise<void>
   on: <K extends keyof AdapterEvents>(event: K, callback: (data: AdapterEvents[K]) => void) => void
   off: <K extends keyof AdapterEvents>(event: K, callback: (data: AdapterEvents[K]) => void) => void
 }
@@ -723,8 +724,23 @@ class SimplePeerManager {
     }, HEARTBEAT_INTERVAL_MS) // Every 60 seconds (reduced from 15s for cost optimization)
   }
 
+  private persistDocumentSync: (() => void) | null = null
+
+  setPersistHandler(handler: () => void): void {
+    this.persistDocumentSync = handler
+  }
+
   private setupBeforeUnloadHandler(): void {
     this.beforeUnloadHandler = () => {
+      // CRITICAL: Persist document before page unload to prevent data loss
+      try {
+        if (this.persistDocumentSync) {
+          this.persistDocumentSync()
+        }
+      } catch (error) {
+        console.warn('Error persisting document on unload:', error)
+      }
+
       // Synchronously clean up our presence on actual page unload
       try {
         const paths = this.getPaths()
@@ -956,6 +972,22 @@ export async function createFirebaseYWebrtcAdapter(opts: AdapterOptions): Promis
   // 8) Start periodic persistence
   const stopPersistence = startPeriodicPersistence(firebaseDatabase, ydoc, docId, syncIntervalMs, databasePaths)
 
+  // 8b) Set up synchronous persist handler for beforeunload
+  // This ensures we save changes even if user refreshes quickly
+  let persistenceVersion = 0
+  const forcePersistSync = () => {
+    try {
+      // Attempt immediate Firebase write during unload
+      persistDocument(firebaseDatabase, ydoc, docId, persistenceVersion++, databasePaths).catch(err => {
+        console.warn('Unload persistence failed:', err)
+      })
+    } catch (error) {
+      console.warn('Force persist sync error:', error)
+    }
+  }
+
+  peerManager.setPersistHandler(forcePersistSync)
+
   // 9) Initialize peer connections
   await peerManager.initialize()
 
@@ -1047,6 +1079,16 @@ export async function createFirebaseYWebrtcAdapter(opts: AdapterOptions): Promis
       // GC runs incrementally during document operations - no manual triggering needed
       // This method is kept for API compatibility but is essentially a no-op
       console.log('Y.js GC is automatic when ydoc.gc = true (current state:', ydoc.gc, ')')
+    },
+    forcePersist: async () => {
+      // Force immediate persistence - useful before critical operations
+      try {
+        await persistDocument(firebaseDatabase, ydoc, docId, persistenceVersion++, databasePaths)
+        console.log('Document force-persisted successfully')
+      } catch (error) {
+        console.error('Force persist failed:', error)
+        throw error
+      }
     },
     on: <K extends keyof AdapterEvents>(event: K, callback: (data: AdapterEvents[K]) => void) => 
       peerManager.on(event, callback),

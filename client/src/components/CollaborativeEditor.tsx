@@ -120,12 +120,24 @@ export default function CollaborativeEditor({
         clearInterval(connectionTimer)
       }
       
-      try {
-        handle?.disconnect()
-        console.log(`Collaborative editor disconnected for document: ${docId}`)
-      } catch (e) {
-        console.warn('Error during disconnect:', e)
-      }
+      // Force persist before disconnect to prevent data loss
+      ;(async () => {
+        try {
+          if (handle?.forcePersist) {
+            await handle.forcePersist()
+            console.log('Document persisted before disconnect')
+          }
+        } catch (e) {
+          console.warn('Error during final persistence:', e)
+        }
+        
+        try {
+          handle?.disconnect()
+          console.log(`Collaborative editor disconnected for document: ${docId}`)
+        } catch (e) {
+          console.warn('Error during disconnect:', e)
+        }
+      })()
     }
   }, [docId, userName, userColor, workspaceId])
 
