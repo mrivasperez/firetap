@@ -264,17 +264,14 @@ export async function createFirebaseYWebrtcAdapter(
       console.warn("Presence cleanup error:", e);
     }
     try {
-      // Clean up Y.js document memory
-      ydoc.getMap().clear();
-      ydoc.getText().delete(0, ydoc.getText().length);
-
-      // Destroy awareness
+      // Destroy awareness first (before document cleanup)
       awareness.destroy();
     } catch (e) {
-      console.warn("Document cleanup error:", e);
+      console.warn("Awareness destroy error:", e);
     }
     try {
       // Final Y.js document cleanup
+      // Note: Don't try to access or clear document contents after destroy
       ydoc.destroy();
     } catch (e) {
       console.warn("Y.js document destroy error:", e);

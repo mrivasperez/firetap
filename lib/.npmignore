@@ -1,0 +1,17 @@
+# Source files
+*.ts
+!*.d.ts
+tsconfig.json
+tsup.config.ts
+
+# Directories
+core/
+firebase/
+utils/
+node_modules/
+
+# Development files
+.git/
+.gitignore
+*.log
+.DS_Store

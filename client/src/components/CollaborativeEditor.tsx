@@ -1,10 +1,10 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useState, useMemo } from 'react'
 import { EditorContent, useEditor } from '@tiptap/react'
 import StarterKit from '@tiptap/starter-kit'
 import Collaboration from '@tiptap/extension-collaboration'
 import CollaborationCaret from '@tiptap/extension-collaboration-caret'
 import { Placeholder } from '@tiptap/extensions'
-import { createFirebaseYWebrtcAdapter, type AdapterHandle } from '../lib/collab-adapter'
+import { createFirebaseYWebrtcAdapter, type AdapterHandle } from 'firetap'
 import { rtdb } from '../firebase'
 import './CollaborativeEditor.css'
 
@@ -32,34 +32,44 @@ export default function CollaborativeEditor({
     isCommonClient: boolean
   } | null>(null)
 
+  // Generate stable user color (memoized to prevent regeneration on re-renders)
+  const stableUserColor = useMemo(() => 
+    userColor || `#${Math.floor(Math.random()*16777215).toString(16)}`,
+    [userColor]
+  )
+
+  // Create editor - with minimal config if adapter not ready
   const editor = useEditor({
-    extensions: [
+    extensions: adapter ? [
       StarterKit.configure({
-        // Disable undoRedo when using collaboration (official pattern)
-        undoRedo: adapter ? false : {},
+        // Disable the History extension (undoRedo) when using collaboration
+        // Y.js provides its own collaborative undo/redo
+        undoRedo: false,
       }),
-      // Only add collaboration extensions when adapter is ready
-      ...(adapter ? [
-        Collaboration.configure({
-          document: adapter.ydoc,
-        }),
-        CollaborationCaret.configure({
-          provider: { awareness: adapter.awareness },
-          user: {
-            name: userName,
-            color: userColor || `#${Math.floor(Math.random()*16777215).toString(16)}`,
-          },
-        }),
-      ] : []),
+      Collaboration.configure({
+        document: adapter.ydoc,
+      }),
+      CollaborationCaret.configure({
+        // Tiptap expects a provider object with an awareness property
+        provider: { awareness: adapter.awareness },
+        user: {
+          name: userName,
+          color: stableUserColor,
+        },
+      }),
       Placeholder.configure({
-        placeholder: adapter 
-          ? 'Start typing to collaborate with other users...'
-          : 'Loading collaborative editor...'
+        placeholder: 'Start typing to collaborate with other users...'
+      }),
+    ] : [
+      // Minimal extensions when adapter not ready to prevent schema errors
+      StarterKit,
+      Placeholder.configure({
+        placeholder: 'Loading collaborative editor...'
       }),
     ],
-    content: '<p>Loading collaborative editor...</p>',
     editable: !!adapter,
-  }, [adapter, userName, userColor])
+    content: adapter ? undefined : '<p>Loading collaborative editor...</p>',
+  }, [adapter, userName, stableUserColor])
 
   useEffect(() => {
     let handle: AdapterHandle | null = null
@@ -141,13 +151,17 @@ export default function CollaborativeEditor({
     }
   }, [docId, userName, userColor, workspaceId])
 
-  // Update editor when adapter changes
+  // Update awareness state when user info changes
   useEffect(() => {
     if (adapter && editor) {
-      // Editor will be recreated with collaboration extensions
-      console.log('Editor updated with collaboration extensions')
+      // Update the awareness state with current user info
+      adapter.awareness.setLocalStateField('user', {
+        name: userName,
+        color: stableUserColor,
+      })
+      console.log('Awareness updated with user info:', { userName, color: stableUserColor })
     }
-  }, [adapter, editor])
+  }, [adapter, editor, userName, stableUserColor])
 
   if (error) {
     return (
