@@ -1,0 +1,15 @@
+{
+  "name": "firetap-workspace",
+  "version": "1.0.0",
+  "private": true,
+  "workspaces": [
+    "lib",
+    "client",
+    "functions"
+  ],
+  "scripts": {
+    "build:lib": "npm run build -w lib",
+    "dev:client": "npm run dev -w client",
+    "build:all": "npm run build -w lib && npm run build -w client"
+  }
+}
