@@ -159,7 +159,7 @@ The workspace includes Firebase configuration files:
 
 The included security rules allow read/write access in emulator mode for easy testing. **Update these before deploying to production!**
 
-## 🏗️ Architecture
+## Architecture
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
