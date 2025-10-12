@@ -1,7 +1,7 @@
 import * as Y from 'yjs'
 import type { Database } from 'firebase/database'
 import { ref, set, get, serverTimestamp } from 'firebase/database'
-import { buildDatabasePaths, type DatabasePathsConfig } from './config'
+import { buildDatabasePaths, type DatabasePathsConfig } from '../utils/config'
 
 // ============================================================================
 // CONSTANTS
@@ -13,6 +13,25 @@ const DEFAULT_PERSISTENCE_INTERVAL_MS = 60_000 // 60 seconds - default periodic 
 
 // Hash Algorithm
 const CHECKSUM_ALGORITHM = 'SHA-256' // Algorithm for document checksums
+
+// ============================================================================
+// UTILITY FUNCTIONS
+// ============================================================================
+
+/**
+ * Fast array equality check for Uint8Arrays
+ */
+function arraysAreEqual(a: Uint8Array, b: Uint8Array): boolean {
+  if (a.length !== b.length) return false
+  for (let i = 0; i < a.length; i++) {
+    if (a[i] !== b[i]) return false
+  }
+  return true
+}
+
+// ============================================================================
+// TYPES
+// ============================================================================
 
 export type DocumentSnapshot = {
   update: string
@@ -57,7 +76,7 @@ export async function loadDocumentFromFirebase(rtdb: Database, docId: string, da
 
 export function startPeriodicPersistence(rtdb: Database, ydoc: Y.Doc, docId: string, intervalMs = DEFAULT_PERSISTENCE_INTERVAL_MS, databasePaths?: DatabasePathsConfig) {
   let persistenceCount = 0
-  let lastPersistedState: string | null = null
+  let lastPersistedStateVector: Uint8Array | null = null
   let debounceTimer: ReturnType<typeof setTimeout> | null = null
   let hasChanges = false
   
@@ -73,10 +92,15 @@ export function startPeriodicPersistence(rtdb: Database, ydoc: Y.Doc, docId: str
     debounceTimer = setTimeout(async () => {
       if (hasChanges) {
         try {
-          const currentState = uint8ArrayToBase64(Y.encodeStateAsUpdate(ydoc))
-          if (currentState !== lastPersistedState) {
+          // OPTIMIZATION: Use state vector comparison instead of full state hash
+          // This is much faster for large documents (O(peers) vs O(document_size))
+          const currentStateVector = Y.encodeStateVector(ydoc)
+          const stateVectorChanged = !lastPersistedStateVector || 
+            !arraysAreEqual(currentStateVector, lastPersistedStateVector)
+          
+          if (stateVectorChanged) {
             await persistDocument(rtdb, ydoc, docId, persistenceCount++, databasePaths)
-            lastPersistedState = currentState
+            lastPersistedStateVector = currentStateVector
             hasChanges = false
           }
         } catch (err) {
@@ -93,10 +117,13 @@ export function startPeriodicPersistence(rtdb: Database, ydoc: Y.Doc, docId: str
   const timer = setInterval(async () => {
     try {
       if (hasChanges) {
-        const currentState = uint8ArrayToBase64(Y.encodeStateAsUpdate(ydoc))
-        if (currentState !== lastPersistedState) {
+        const currentStateVector = Y.encodeStateVector(ydoc)
+        const stateVectorChanged = !lastPersistedStateVector || 
+          !arraysAreEqual(currentStateVector, lastPersistedStateVector)
+        
+        if (stateVectorChanged) {
           await persistDocument(rtdb, ydoc, docId, persistenceCount++, databasePaths)
-          lastPersistedState = currentState
+          lastPersistedStateVector = currentStateVector
           hasChanges = false
         }
       }
@@ -105,8 +132,8 @@ export function startPeriodicPersistence(rtdb: Database, ydoc: Y.Doc, docId: str
     }
   }, intervalMs)
 
-  // Initialize the last persisted state
-  lastPersistedState = uint8ArrayToBase64(Y.encodeStateAsUpdate(ydoc))
+  // Initialize the last persisted state vector
+  lastPersistedStateVector = Y.encodeStateVector(ydoc)
 
   return () => {
     ydoc.off('update', updateHandler)
@@ -335,11 +362,20 @@ export async function getDocumentVersion(rtdb: Database, docId: string, database
 
 // Utility functions
 function uint8ArrayToBase64(uint8Array: Uint8Array): string {
-  return btoa(String.fromCharCode(...uint8Array))
+  // Handle large arrays by processing in chunks to avoid "too many arguments" error
+  const CHUNK_SIZE = 8192; // 8KB chunks - safe for function call stack
+  let binary = '';
+  
+  for (let i = 0; i < uint8Array.length; i += CHUNK_SIZE) {
+    const chunk = uint8Array.subarray(i, Math.min(i + CHUNK_SIZE, uint8Array.length));
+    binary += String.fromCharCode(...chunk);
+  }
+  
+  return btoa(binary);
 }
 
 function base64ToUint8Array(base64: string): Uint8Array {
-  return Uint8Array.from(atob(base64), (c) => c.charCodeAt(0))
+  return Uint8Array.from(atob(base64), (c) => c.charCodeAt(0));
 }
 
 async function calculateChecksum(data: Uint8Array): Promise<string> {

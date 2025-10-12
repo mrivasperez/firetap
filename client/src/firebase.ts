@@ -11,8 +11,8 @@ const firebaseConfig = {
   authDomain: 'fake-auth-domain',
   // RTDB URL points to emulator namespace; RTDB SDK ignores this for emulator connection,
   // but having a URL helps some helper libraries if they read it.
-  databaseURL: 'http://localhost:9000?ns=demo-realtime-tiptap',
-  projectId: 'demo-realtime-tiptap',
+  databaseURL: 'http://localhost:9000?ns=demo-firetap',
+  projectId: 'demo-firetap',
   storageBucket: 'fake-storage-bucket',
   messagingSenderId: 'fake-msg-sender',
   appId: 'fake-app-id',

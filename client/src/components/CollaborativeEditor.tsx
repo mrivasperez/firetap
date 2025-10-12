@@ -1,10 +1,10 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useState, useMemo } from 'react'
 import { EditorContent, useEditor } from '@tiptap/react'
 import StarterKit from '@tiptap/starter-kit'
 import Collaboration from '@tiptap/extension-collaboration'
 import CollaborationCaret from '@tiptap/extension-collaboration-caret'
 import { Placeholder } from '@tiptap/extensions'
-import { createFirebaseYWebrtcAdapter, type AdapterHandle } from '../lib/collab-adapter'
+import { createFirebaseYWebrtcAdapter, type AdapterHandle } from 'firetap'
 import { rtdb } from '../firebase'
 import './CollaborativeEditor.css'
 
@@ -32,34 +32,55 @@ export default function CollaborativeEditor({
     isCommonClient: boolean
   } | null>(null)
 
+  // Generate stable user color (memoized to prevent regeneration on re-renders)
+  const stableUserColor = useMemo(() => 
+    userColor || `#${Math.floor(Math.random()*16777215).toString(16)}`,
+    [userColor]
+  )
+
+  // Create editor - with minimal config if adapter not ready
   const editor = useEditor({
-    extensions: [
+    extensions: adapter ? [
       StarterKit.configure({
-        // Disable undoRedo when using collaboration (official pattern)
-        undoRedo: adapter ? false : {},
+        // Disable the History extension (undoRedo) when using collaboration
+        // Y.js provides its own collaborative undo/redo
+        undoRedo: false,
       }),
-      // Only add collaboration extensions when adapter is ready
-      ...(adapter ? [
-        Collaboration.configure({
-          document: adapter.ydoc,
-        }),
-        CollaborationCaret.configure({
-          provider: { awareness: adapter.awareness },
-          user: {
-            name: userName,
-            color: userColor || `#${Math.floor(Math.random()*16777215).toString(16)}`,
-          },
-        }),
-      ] : []),
+      Collaboration.configure({
+        document: adapter.ydoc,
+        // Fragment optimization - only sync the content that changed
+        field: 'default',
+      }),
+      CollaborationCaret.configure({
+        // Tiptap expects a provider object with an awareness property
+        provider: { awareness: adapter.awareness },
+        user: {
+          name: userName,
+          color: stableUserColor,
+        },
+      }),
       Placeholder.configure({
-        placeholder: adapter 
-          ? 'Start typing to collaborate with other users...'
-          : 'Loading collaborative editor...'
+        placeholder: 'Start typing to collaborate with other users...'
+      }),
+    ] : [
+      // Minimal extensions when adapter not ready to prevent schema errors
+      StarterKit,
+      Placeholder.configure({
+        placeholder: 'Loading collaborative editor...'
       }),
     ],
-    content: '<p>Loading collaborative editor...</p>',
     editable: !!adapter,
-  }, [adapter, userName, userColor])
+    content: adapter ? undefined : '<p>Loading collaborative editor...</p>',
+    // Performance optimizations
+    enableInputRules: true,
+    enablePasteRules: true,
+    // Immediately update on every transaction for snappy feel
+    editorProps: {
+      attributes: {
+        class: 'prose prose-sm sm:prose lg:prose-lg xl:prose-2xl mx-auto focus:outline-none',
+      },
+    },
+  }, [adapter, userName, stableUserColor])
 
   useEffect(() => {
     let handle: AdapterHandle | null = null
@@ -74,10 +95,10 @@ export default function CollaborativeEditor({
         
         handle = await createFirebaseYWebrtcAdapter({ 
           docId,
-          firebaseDatabase: rtdb, // Add required Firebase database instance
+          firebaseDatabase: rtdb,
           user: { name: userName },
-          syncIntervalMs: 15000, // 15 second sync interval
-          maxDirectPeers: 6, // Reasonable cluster size
+          syncIntervalMs: 30000, // 30 second Firebase persistence (WebRTC handles realtime sync)
+          maxDirectPeers: 8, // Optimize for better mesh connectivity
           databasePaths: {
             structure: 'nested',
             nested: {
@@ -95,17 +116,17 @@ export default function CollaborativeEditor({
         setAdapter(handle)
         setIsLoading(false)
         
-        // Update connection info periodically
+        // Update connection info less frequently to reduce re-renders
         connectionTimer = setInterval(() => {
           if (handle) {
             const userInfo = handle.getUserInfo()
             setConnectionInfo({
               peerCount: handle.getPeerCount(),
-              clusterId: userInfo.id.slice(-8), // Use user ID as cluster identifier
-              isCommonClient: false // y-webrtc manages this internally
+              clusterId: userInfo.id.slice(-8),
+              isCommonClient: false
             })
           }
-        }, 2000)
+        }, 5000) // Reduced from 2s to 5s
         
         console.log(`Collaborative editor initialized successfully`)
       } catch (err) {
@@ -120,22 +141,38 @@ export default function CollaborativeEditor({
         clearInterval(connectionTimer)
       }
       
-      try {
-        handle?.disconnect()
-        console.log(`Collaborative editor disconnected for document: ${docId}`)
-      } catch (e) {
-        console.warn('Error during disconnect:', e)
-      }
+      // Force persist before disconnect to prevent data loss
+      ;(async () => {
+        try {
+          if (handle?.forcePersist) {
+            await handle.forcePersist()
+            console.log('Document persisted before disconnect')
+          }
+        } catch (e) {
+          console.warn('Error during final persistence:', e)
+        }
+        
+        try {
+          handle?.disconnect()
+          console.log(`Collaborative editor disconnected for document: ${docId}`)
+        } catch (e) {
+          console.warn('Error during disconnect:', e)
+        }
+      })()
     }
   }, [docId, userName, userColor, workspaceId])
 
-  // Update editor when adapter changes
+  // Update awareness state when user info changes
   useEffect(() => {
     if (adapter && editor) {
-      // Editor will be recreated with collaboration extensions
-      console.log('Editor updated with collaboration extensions')
+      // Update the awareness state with current user info
+      adapter.awareness.setLocalStateField('user', {
+        name: userName,
+        color: stableUserColor,
+      })
+      console.log('Awareness updated with user info:', { userName, color: stableUserColor })
     }
-  }, [adapter, editor])
+  }, [adapter, editor, userName, stableUserColor])
 
   if (error) {
     return (
