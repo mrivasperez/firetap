@@ -1,18 +1,14 @@
 import { type AdapterOptions } from "../adapter";
 
-// ============================================================================
-// CONSTANTS
-// ============================================================================
-
 // Validation Limits
-const MIN_DIRECT_PEERS = 1 // Minimum number of direct peer connections
-const MAX_DIRECT_PEERS_LIMIT = 20 // Maximum number of direct peer connections (validation)
-const MIN_SYNC_INTERVAL_MS = 1_000 // Minimum sync interval (1 second)
+const MIN_DIRECT_PEERS = 1; // Minimum number of direct peer connections
+const MAX_DIRECT_PEERS_LIMIT = 20; // Maximum number of direct peer connections (validation)
+const MIN_SYNC_INTERVAL_MS = 1_000; // Minimum sync interval (1 second)
 
 export type DatabasePathsConfig = {
   // Base path structure - can be 'flat' or 'nested'
-  structure: 'flat' | 'nested';
-  
+  structure: "flat" | "nested";
+
   // For 'flat' structure: separate top-level paths
   flat?: {
     documents: string;
@@ -20,13 +16,13 @@ export type DatabasePathsConfig = {
     snapshots: string;
     signaling: string;
   };
-  
+
   // For 'nested' structure: all under documents/{{docId}}
   nested?: {
     basePath: string; // e.g., '/documents'
     subPaths: {
       documents: string; // e.g., 'documents'
-      rooms: string;     // e.g., 'rooms'
+      rooms: string; // e.g., 'rooms'
       snapshots: string; // e.g., 'snapshots'
       signaling: string; // e.g., 'signaling'
     };
@@ -62,16 +58,16 @@ export type CollaborationConfig = {
 };
 
 export const DEFAULT_DATABASE_PATHS: DatabasePathsConfig = {
-  structure: 'nested',
+  structure: "nested",
   nested: {
-    basePath: '/documents',
+    basePath: "/documents",
     subPaths: {
-      documents: 'documents',
-      rooms: 'rooms',
-      snapshots: 'snapshots',
-      signaling: 'signaling'
-    }
-  }
+      documents: "documents",
+      rooms: "rooms",
+      snapshots: "snapshots",
+      signaling: "signaling",
+    },
+  },
 };
 
 export const DEFAULT_CONFIG: CollaborationConfig = {
@@ -93,7 +89,7 @@ export const DEFAULT_CONFIG: CollaborationConfig = {
 
 export function createAdapterConfig(
   config: Partial<CollaborationConfig>
-): Omit<AdapterOptions, 'firebaseDatabase'> {
+): Omit<AdapterOptions, "firebaseDatabase"> {
   const mergedConfig = { ...DEFAULT_CONFIG, ...config };
 
   return {
@@ -112,38 +108,41 @@ export function generateUserId(): string {
 }
 
 // Configuration creators (return partial configs - user must add firebaseDatabase)
-export function createSimpleConfig(docId: string, user: { name: string }): Omit<AdapterOptions, 'firebaseDatabase'> {
+export function createSimpleConfig(
+  docId: string,
+  user: { name: string }
+): Omit<AdapterOptions, "firebaseDatabase"> {
   return {
     docId,
     user,
     maxDirectPeers: 6,
     syncIntervalMs: 15000,
-    databasePaths: DEFAULT_DATABASE_PATHS
+    databasePaths: DEFAULT_DATABASE_PATHS,
   };
 }
 
 export function createWorkspaceConfig(
-  docId: string, 
-  workspaceId: string, 
+  docId: string,
+  workspaceId: string,
   user: { name: string }
-): Omit<AdapterOptions, 'firebaseDatabase'> {
+): Omit<AdapterOptions, "firebaseDatabase"> {
   return {
     docId,
     user,
     maxDirectPeers: 6,
     syncIntervalMs: 15000,
     databasePaths: {
-      structure: 'nested',
+      structure: "nested",
       nested: {
         basePath: `/${workspaceId}/documents`,
         subPaths: {
-          documents: 'documents',
-          rooms: 'rooms', 
-          snapshots: 'snapshots',
-          signaling: 'signaling'
-        }
-      }
-    }
+          documents: "documents",
+          rooms: "rooms",
+          snapshots: "snapshots",
+          signaling: "signaling",
+        },
+      },
+    },
   };
 }
 
@@ -160,9 +159,12 @@ export function validateConfig(config: Partial<CollaborationConfig>): string[] {
 
   if (
     config.maxDirectPeers &&
-    (config.maxDirectPeers < MIN_DIRECT_PEERS || config.maxDirectPeers > MAX_DIRECT_PEERS_LIMIT)
+    (config.maxDirectPeers < MIN_DIRECT_PEERS ||
+      config.maxDirectPeers > MAX_DIRECT_PEERS_LIMIT)
   ) {
-    errors.push(`Max direct peers must be between ${MIN_DIRECT_PEERS} and ${MAX_DIRECT_PEERS_LIMIT}`);
+    errors.push(
+      `Max direct peers must be between ${MIN_DIRECT_PEERS} and ${MAX_DIRECT_PEERS_LIMIT}`
+    );
   }
 
   if (config.syncIntervalMs && config.syncIntervalMs < MIN_SYNC_INTERVAL_MS) {
@@ -175,22 +177,23 @@ export function validateConfig(config: Partial<CollaborationConfig>): string[] {
 export type ConnectionState = "disconnected" | "connecting" | "connected";
 
 export function buildDatabasePaths(config: DatabasePathsConfig, docId: string) {
-  if (config.structure === 'flat') {
-    if (!config.flat) throw new Error('Flat structure requires flat config');
+  if (config.structure === "flat") {
+    if (!config.flat) throw new Error("Flat structure requires flat config");
     return {
       documents: config.flat.documents,
       rooms: config.flat.rooms,
       snapshots: config.flat.snapshots,
-      signaling: config.flat.signaling
+      signaling: config.flat.signaling,
     };
-  } else if (config.structure === 'nested') {
-    if (!config.nested) throw new Error('Nested structure requires nested config');
+  } else if (config.structure === "nested") {
+    if (!config.nested)
+      throw new Error("Nested structure requires nested config");
     const base = `${config.nested.basePath}/${docId}`;
     return {
       documents: `${base}/${config.nested.subPaths.documents}`,
       rooms: `${base}/${config.nested.subPaths.rooms}`,
       snapshots: `${base}/${config.nested.subPaths.snapshots}`,
-      signaling: `${base}/${config.nested.subPaths.signaling}`
+      signaling: `${base}/${config.nested.subPaths.signaling}`,
     };
   } else {
     throw new Error(`Unknown database structure: ${config.structure}`);

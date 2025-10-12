@@ -1,7 +1,3 @@
-// ============================================================================
-// CONSTANTS
-// ============================================================================
-
 // Peer Connection Configuration
 export const DEFAULT_MAX_DIRECT_PEERS = 20; // Maximum number of WebRTC peer connections
 export const PEER_PRESENCE_TIMEOUT_MS = 600_000; // 10 minutes - consider peer stale if not seen (2x heartbeat)
@@ -25,7 +21,7 @@ export const MIN_VISIBILITY_UPDATE_INTERVAL = 120_000; // 2 minutes - throttle f
 export const DEFAULT_SYNC_INTERVAL_MS = 30_000; // 30 seconds - Firebase persistence (not realtime sync)
 
 // Awareness Throttling Configuration
-export const AWARENESS_THROTTLE_MS = 100; // 100ms batch window = max 10 updates/second (reduced overhead)
+export const AWARENESS_THROTTLE_MS = 50; // 50ms = 20 updates/second - smooth cursors without jitter
 export const LOCAL_AWARENESS_THROTTLE_MS = 16; // ~60fps for local cursor updates
 
 // Compression Configuration
