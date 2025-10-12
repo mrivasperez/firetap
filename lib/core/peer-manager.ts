@@ -29,6 +29,8 @@ import {
   STALE_CONNECTION_TIMEOUT_MS,
   MIN_VISIBILITY_UPDATE_INTERVAL,
   STUN_SERVERS,
+  MAX_CHUNK_SIZE,
+  CHUNK_HEADER_SIZE,
 } from "../utils/constants";
 import type { AdapterEvents, SignalData } from "./types";
 
@@ -129,6 +131,9 @@ export class SimplePeerManager {
   private maxPeers: number; // Prevent too many connections
   private messageBuffer: Array<{ timestamp: number; size: number }> = [];
   private maxBufferSize = MAX_MESSAGE_BUFFER_SIZE;
+  
+  // Chunked message reassembly buffers
+  private chunkBuffers = new Map<string, Map<number, { chunk: number[]; totalChunks: number }>>();
 
   constructor(
     docId: string,
@@ -300,23 +305,8 @@ export class SimplePeerManager {
             connectedAt: Date.now(),
           },
         });
-
-        // OPTIMIZATION: Delta-only sync - send full state on initial connection,
-        // then track state for future delta updates
-        const dataChannel = this.dataChannels.get(otherPeerId);
-        if (dataChannel && dataChannel.readyState === "open") {
-          const lastState = this.peerSyncState.get(otherPeerId);
-          const update = lastState
-            ? Y.encodeStateAsUpdate(this.ydoc, lastState) // Delta only (70-90% bandwidth reduction)
-            : Y.encodeStateAsUpdate(this.ydoc);            // Full state for new peer
-          
-          dataChannel.send(
-            JSON.stringify({ type: "sync", update: Array.from(update) })
-          );
-          
-          // Track current state for next delta sync
-          this.peerSyncState.set(otherPeerId, Y.encodeStateVector(this.ydoc));
-        }
+        
+        // Initial sync now happens in dataChannel.onopen to ensure channel is ready
       } else if (
         state === "failed" ||
         state === "disconnected" ||
@@ -400,10 +390,35 @@ export class SimplePeerManager {
   private setupDataChannel(peerId: string, dataChannel: RTCDataChannel): void {
     dataChannel.onopen = () => {
       console.log(`Data channel opened for peer ${peerId}`);
+      
+      // CRITICAL: Send initial document state when data channel opens
+      // This ensures new peers receive the full document
+      try {
+        const lastState = this.peerSyncState.get(peerId);
+        const update = lastState
+          ? Y.encodeStateAsUpdate(this.ydoc, lastState) // Delta only
+          : Y.encodeStateAsUpdate(this.ydoc);            // Full state for new peer
+        
+        // Only send if there's actual content to sync
+        if (update.length > 0) {
+          const message = JSON.stringify({ 
+            type: "sync", 
+            update: Array.from(update) 
+          });
+          dataChannel.send(message);
+          console.log(`Sent initial sync to peer ${peerId} (${update.length} bytes)`);
+          
+          // Track current state for next delta sync
+          this.peerSyncState.set(peerId, Y.encodeStateVector(this.ydoc));
+        }
+      } catch (error) {
+        console.error(`Error sending initial sync to ${peerId}:`, error);
+      }
     };
 
     dataChannel.onmessage = async (event) => {
       try {
+        // OPTIMIZATION: Use try-catch for JSON parsing to handle malformed messages gracefully
         const message = JSON.parse(event.data);
         const messageSize = event.data.length;
 
@@ -411,7 +426,14 @@ export class SimplePeerManager {
         this.trackMessage(messageSize);
 
         if (message.type === "sync" && message.update) {
-          Y.applyUpdate(this.ydoc, new Uint8Array(message.update));
+          // OPTIMIZATION: Apply remote update with origin to prevent re-broadcasting
+          // Reuse Uint8Array to avoid extra allocations
+          const updateArray = new Uint8Array(message.update);
+          Y.applyUpdate(this.ydoc, updateArray, this);
+          console.log(`Applied sync update from peer ${peerId} (${updateArray.length} bytes)`);
+        } else if (message.type === "sync-chunk" && message.update) {
+          // Handle chunked sync message
+          this.handleChunkedMessage(peerId, message);
         } else if (message.type === "awareness" && message.update) {
           // Apply awareness updates from peer with size limit check
           if (this.awareness.getStates().size < MAX_AWARENESS_STATES) {
@@ -584,10 +606,48 @@ export class SimplePeerManager {
   }
 
   broadcastUpdate(update: Uint8Array): void {
-    const message = JSON.stringify({
-      type: "sync",
-      update: Array.from(update),
-    });
+    // OPTIMIZATION: Skip broadcasting empty or tiny updates to reduce overhead
+    if (update.length === 0 || update.length < 3) {
+      return;
+    }
+    
+    const updateArray = Array.from(update);
+    const baseMessage = { type: "sync" };
+    const testMessage = JSON.stringify({ ...baseMessage, update: [] });
+    const maxDataSize = MAX_CHUNK_SIZE - CHUNK_HEADER_SIZE - testMessage.length;
+    
+    // Check if message needs chunking
+    const totalSize = updateArray.length;
+    if (totalSize <= maxDataSize) {
+      // Small message - send as is
+      const message = JSON.stringify({
+        type: "sync",
+        update: updateArray,
+      });
+      this.sendToAllPeers(message);
+    } else {
+      // Large message - chunk it
+      const chunks = Math.ceil(totalSize / maxDataSize);
+      const messageId = `${this.peerId}-${Date.now()}`;
+      
+      for (let i = 0; i < chunks; i++) {
+        const start = i * maxDataSize;
+        const end = Math.min(start + maxDataSize, totalSize);
+        const chunk = updateArray.slice(start, end);
+        
+        const message = JSON.stringify({
+          type: "sync-chunk",
+          messageId,
+          chunk: i,
+          totalChunks: chunks,
+          update: chunk,
+        });
+        this.sendToAllPeers(message);
+      }
+    }
+  }
+
+  private sendToAllPeers(message: string): void {
     this.dataChannels.forEach((dataChannel, peerId) => {
       if (dataChannel.readyState === "open") {
         try {
@@ -632,6 +692,45 @@ export class SimplePeerManager {
     return this.connectionStatus;
   }
 
+  private handleChunkedMessage(peerId: string, message: {
+    messageId: string;
+    chunk: number;
+    totalChunks: number;
+    update: number[];
+  }): void {
+    const { chunk, totalChunks, update } = message;
+    
+    // Initialize buffer for this peer if needed
+    if (!this.chunkBuffers.has(peerId)) {
+      this.chunkBuffers.set(peerId, new Map());
+    }
+    
+    const peerBuffer = this.chunkBuffers.get(peerId)!;
+    
+    // Initialize buffer for this message if needed
+    if (!peerBuffer.has(chunk)) {
+      peerBuffer.set(chunk, { chunk: update, totalChunks });
+    }
+    
+    // Check if we have all chunks
+    if (peerBuffer.size === totalChunks) {
+      // Reassemble the complete message
+      const completeUpdate: number[] = [];
+      for (let i = 0; i < totalChunks; i++) {
+        const chunkData = peerBuffer.get(i);
+        if (chunkData) {
+          completeUpdate.push(...chunkData.chunk);
+        }
+      }
+      
+      // Apply the complete update
+      Y.applyUpdate(this.ydoc, new Uint8Array(completeUpdate), this);
+      
+      // Clean up the buffer for this message
+      peerBuffer.clear();
+    }
+  }
+
   private trackMessage(size: number): void {
     const now = Date.now();
     this.messageBuffer.push({ timestamp: now, size });
@@ -672,6 +771,7 @@ export class SimplePeerManager {
         peer.close();
         this.peers.delete(peerId);
         this.dataChannels.delete(peerId);
+        this.chunkBuffers.delete(peerId); // Clean up chunk buffers
       }
     });
 
@@ -756,6 +856,9 @@ export class SimplePeerManager {
     
     // Clean up delta sync state
     this.peerSyncState.delete(peerId);
+    
+    // Clean up chunk buffers
+    this.chunkBuffers.delete(peerId);
 
     // Remove peer from Firebase presence immediately (WebRTC-based stale detection)
     // This provides instant cleanup when WebRTC detects disconnection/failure

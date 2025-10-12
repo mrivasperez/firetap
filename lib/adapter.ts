@@ -97,9 +97,43 @@ export async function createFirebaseYWebrtcAdapter(
     maxDirectPeers
   );
 
-  // 5) Set up Y.js event handlers
-  ydoc.on("update", (update: Uint8Array) => {
-    peerManager.broadcastUpdate(update);
+  // 5) Set up Y.js event handlers with origin tracking and throttling
+  // Origin tracking prevents broadcasting updates that came from remote peers
+  // Throttling batches rapid local changes to reduce overhead for large documents
+  let updateBatchTimer: ReturnType<typeof setTimeout> | null = null;
+  let pendingUpdates: Uint8Array[] = [];
+  const UPDATE_BATCH_MS = 50; // Batch updates within 50ms window
+  
+  ydoc.on("update", (update: Uint8Array, origin: any) => {
+    // Only broadcast updates that originated locally
+    // This prevents echo/loops and improves performance
+    if (origin !== peerManager) {
+      // Collect updates for batching
+      pendingUpdates.push(update);
+      
+      // Clear existing timer to extend batch window
+      if (updateBatchTimer) {
+        clearTimeout(updateBatchTimer);
+      }
+      
+      // Batch multiple rapid updates (e.g., typing) into single broadcast
+      updateBatchTimer = setTimeout(() => {
+        if (pendingUpdates.length > 0) {
+          // Merge all pending updates into one
+          if (pendingUpdates.length === 1) {
+            // Single update - send as-is (fast path)
+            peerManager.broadcastUpdate(pendingUpdates[0]);
+          } else {
+            // Multiple updates - merge them efficiently
+            // Y.js's mergeUpdates combines multiple updates into a single minimal update
+            const merged = Y.mergeUpdates(pendingUpdates);
+            peerManager.broadcastUpdate(merged);
+          }
+          pendingUpdates = [];
+        }
+        updateBatchTimer = null;
+      }, UPDATE_BATCH_MS);
+    }
   });
 
   // 5b) Set up THROTTLED awareness updates to reduce cursor/selection update overhead
@@ -247,6 +281,13 @@ export async function createFirebaseYWebrtcAdapter(
       clearTimeout(awarenessBatchTimer);
       awarenessBatchTimer = null;
     }
+    
+    // Clear update batch timer to prevent memory leaks
+    if (updateBatchTimer) {
+      clearTimeout(updateBatchTimer);
+      updateBatchTimer = null;
+    }
+    pendingUpdates = [];
 
     try {
       peerManager.destroy();

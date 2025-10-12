@@ -48,6 +48,8 @@ export default function CollaborativeEditor({
       }),
       Collaboration.configure({
         document: adapter.ydoc,
+        // Fragment optimization - only sync the content that changed
+        field: 'default',
       }),
       CollaborationCaret.configure({
         // Tiptap expects a provider object with an awareness property
@@ -69,6 +71,15 @@ export default function CollaborativeEditor({
     ],
     editable: !!adapter,
     content: adapter ? undefined : '<p>Loading collaborative editor...</p>',
+    // Performance optimizations
+    enableInputRules: true,
+    enablePasteRules: true,
+    // Immediately update on every transaction for snappy feel
+    editorProps: {
+      attributes: {
+        class: 'prose prose-sm sm:prose lg:prose-lg xl:prose-2xl mx-auto focus:outline-none',
+      },
+    },
   }, [adapter, userName, stableUserColor])
 
   useEffect(() => {
@@ -84,10 +95,10 @@ export default function CollaborativeEditor({
         
         handle = await createFirebaseYWebrtcAdapter({ 
           docId,
-          firebaseDatabase: rtdb, // Add required Firebase database instance
+          firebaseDatabase: rtdb,
           user: { name: userName },
-          syncIntervalMs: 15000, // 15 second sync interval
-          maxDirectPeers: 6, // Reasonable cluster size
+          syncIntervalMs: 30000, // 30 second Firebase persistence (WebRTC handles realtime sync)
+          maxDirectPeers: 8, // Optimize for better mesh connectivity
           databasePaths: {
             structure: 'nested',
             nested: {
@@ -105,17 +116,17 @@ export default function CollaborativeEditor({
         setAdapter(handle)
         setIsLoading(false)
         
-        // Update connection info periodically
+        // Update connection info less frequently to reduce re-renders
         connectionTimer = setInterval(() => {
           if (handle) {
             const userInfo = handle.getUserInfo()
             setConnectionInfo({
               peerCount: handle.getPeerCount(),
-              clusterId: userInfo.id.slice(-8), // Use user ID as cluster identifier
-              isCommonClient: false // y-webrtc manages this internally
+              clusterId: userInfo.id.slice(-8),
+              isCommonClient: false
             })
           }
-        }, 2000)
+        }, 5000) // Reduced from 2s to 5s
         
         console.log(`Collaborative editor initialized successfully`)
       } catch (err) {

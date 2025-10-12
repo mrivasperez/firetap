@@ -22,14 +22,19 @@ export const MEMORY_CHECK_INTERVAL_MS = 300_000; // 5 minutes - interval for mem
 export const MIN_VISIBILITY_UPDATE_INTERVAL = 120_000; // 2 minutes - throttle for visibility change updates
 
 // Default Configuration
-export const DEFAULT_SYNC_INTERVAL_MS = 15_000; // 15 seconds - default document sync interval
+export const DEFAULT_SYNC_INTERVAL_MS = 30_000; // 30 seconds - Firebase persistence (not realtime sync)
 
 // Awareness Throttling Configuration
-export const AWARENESS_THROTTLE_MS = 50; // 50ms batch window = max 20 updates/second
+export const AWARENESS_THROTTLE_MS = 100; // 100ms batch window = max 10 updates/second (reduced overhead)
+export const LOCAL_AWARENESS_THROTTLE_MS = 16; // ~60fps for local cursor updates
 
 // Compression Configuration
-export const COMPRESSION_THRESHOLD = 100; // Only compress messages larger than 100 bytes
+export const COMPRESSION_THRESHOLD = 512; // Only compress messages larger than 512 bytes (increased threshold)
 export const USE_NATIVE_COMPRESSION = typeof CompressionStream !== 'undefined'; // Check browser support
+
+// WebRTC Data Channel Configuration
+export const MAX_CHUNK_SIZE = 32_000; // 32KB - increased from 16KB for better throughput with large docs
+export const CHUNK_HEADER_SIZE = 200; // Reserve space for JSON overhead
 
 // WebRTC Configuration
 export const STUN_SERVERS = [
