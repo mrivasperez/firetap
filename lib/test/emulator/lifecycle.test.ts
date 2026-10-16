@@ -161,7 +161,7 @@ describe('peer lifecycle', () => {
       expect(vi.getTimerCount()).toBeGreaterThan(timersBefore)
       expect(listeners.size).toBeGreaterThan(listenersBefore)
 
-      adapter.disconnect()
+      await adapter.disconnect()
       expect(vi.getTimerCount()).toBe(timersBefore)
       expect(listeners.size).toBe(listenersBefore)
     })

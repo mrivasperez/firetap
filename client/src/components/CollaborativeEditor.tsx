@@ -97,19 +97,9 @@ export default function CollaborativeEditor({
           docId,
           firebaseDatabase: rtdb,
           user: { name: userName },
-          syncIntervalMs: 30000, // 30 second Firebase persistence (WebRTC handles realtime sync)
-          maxDirectPeers: 8, // Optimize for better mesh connectivity
           databasePaths: {
             structure: 'nested',
-            nested: {
-              basePath: `/${workspaceId}/documents`,
-              subPaths: {
-                documents: 'documents',
-                rooms: 'rooms',
-                snapshots: 'snapshots',
-                signaling: 'signaling'
-              }
-            }
+            nested: { basePath: `/${workspaceId}/documents` }
           }
         })
         
@@ -141,24 +131,9 @@ export default function CollaborativeEditor({
         clearInterval(connectionTimer)
       }
       
-      // Force persist before disconnect to prevent data loss
-      ;(async () => {
-        try {
-          if (handle?.forcePersist) {
-            await handle.forcePersist()
-            console.log('Document persisted before disconnect')
-          }
-        } catch (e) {
-          console.warn('Error during final persistence:', e)
-        }
-        
-        try {
-          handle?.disconnect()
-          console.log(`Collaborative editor disconnected for document: ${docId}`)
-        } catch (e) {
-          console.warn('Error during disconnect:', e)
-        }
-      })()
+      handle?.disconnect().then(() => {
+        console.log(`Collaborative editor disconnected for document: ${docId}`)
+      })
     }
   }, [docId, userName, userColor, workspaceId])
 

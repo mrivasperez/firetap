@@ -13,15 +13,14 @@ describe('default database paths', () => {
 
     const a = await createFirebaseYWebrtcAdapter({ docId: docA, firebaseDatabase: createClient() })
     a.ydoc.getText('t').insert(0, 'only in A')
-    await a.forcePersist()
-    a.disconnect()
+    await a.disconnect()
 
     const b = await createFirebaseYWebrtcAdapter({ docId: docB, firebaseDatabase: createClient() })
     expect(b.ydoc.getText('t').toString()).toBe('')
-    b.disconnect()
+    await b.disconnect()
 
-    expect(await readRaw(`/documents/${docA}/snapshots/latest/update`)).toEqual(expect.any(String))
-    expect(await readRaw(`/documents/${docB}/snapshots/latest`)).toBeNull()
+    expect(await readRaw(`/documents/${docA}/updates`)).not.toBeNull()
+    expect(await readRaw(`/documents/${docB}/updates`)).toBeNull()
   })
 
   it('rejects an invalid docId before touching Firebase', async () => {

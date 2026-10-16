@@ -48,8 +48,9 @@ describe('forwarding between peers', () => {
         $root: {
           $doc: {
             rooms: { '.write': true },
+            updates: { '.write': true },
             snapshots: { '.write': true },
-            documents: { '.write': true },
+            meta: { '.write': true },
             signaling: {
               $target: {
                 $msg: {

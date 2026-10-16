@@ -48,13 +48,7 @@ const fx = {
       user: { name: opts.name },
       maxDirectPeers: opts.maxDirectPeers,
       logger: params.get('debug') ? console : undefined,
-      databasePaths: {
-        structure: 'nested',
-        nested: {
-          basePath: opts.basePath,
-          subPaths: { documents: 'documents', rooms: 'rooms', snapshots: 'snapshots', signaling: 'signaling' },
-        },
-      },
+      databasePaths: { structure: 'nested', nested: { basePath: opts.basePath } },
     })
     return adapter.getUserInfo().id
   },
@@ -99,11 +93,11 @@ const fx = {
   },
 
   async save(): Promise<void> {
-    await adapter!.forcePersist()
+    await adapter!.flush()
   },
 
   async close(): Promise<void> {
-    adapter?.disconnect()
+    await adapter?.disconnect()
     adapter = null
   },
 }

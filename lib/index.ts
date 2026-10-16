@@ -6,3 +6,6 @@ export type { DatabasePathsConfig, ConnectionState } from './utils/config'
 
 export type { PeerInfo } from './core/types'
 export type { Logger } from './utils/logger'
+
+export { LoadError } from './firebase/document-store'
+export type { SaveState } from './firebase/document-store'

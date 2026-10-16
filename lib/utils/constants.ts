@@ -10,7 +10,11 @@ export const ICE_GATHERING_MAX_MS = 3_000;
 export const ICE_SETTLE_MS = 300;
 export const ANTI_ENTROPY_INTERVAL_MS = 30_000;
 
-export const DEFAULT_SYNC_INTERVAL_MS = 30_000;
+export const DEFAULT_PERSIST_DEBOUNCE_MS = 1_000;
+export const PERSIST_RETRY_BASE_MS = 1_000;
+export const PERSIST_RETRY_MAX_MS = 30_000;
+export const DISCONNECT_FLUSH_TIMEOUT_MS = 5_000;
+export const RESCUE_JITTER_MS = 3_000;
 
 export const AWARENESS_THROTTLE_MS = 50;
 

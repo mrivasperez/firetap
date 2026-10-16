@@ -3,13 +3,15 @@ import * as Y from "yjs";
 import { Awareness } from "y-protocols/awareness";
 import type { DatabasePathsConfig, ConnectionState } from "../utils/config";
 import type { Logger } from "../utils/logger";
+import type { SaveState } from "../firebase/document-store";
 
 export type AdapterOptions = {
   docId: string;
   firebaseDatabase: Database;
   peerId?: string;
   user?: { name?: string };
-  syncIntervalMs?: number;
+  // Local edits are batched for this long before being written (default 1000ms).
+  persistDebounceMs?: number;
   // Direct WebRTC links per peer (default 6); larger rooms relay through peers.
   maxDirectPeers?: number;
   databasePaths?: DatabasePathsConfig;
@@ -21,6 +23,9 @@ export type AdapterEvents = {
   "peer-joined": { peerId: string; user: PeerInfo };
   "peer-left": { peerId: string };
   "document-persisted": { docId: string; version: number };
+  "save-state-changed": { state: SaveState };
+  // Retried automatically; saveState stays "error" until a write succeeds.
+  "persist-error": { error: Error };
   error: { error: Error; context: string };
   "sync-completed": { docId: string; updateSize: number };
 };
@@ -28,12 +33,16 @@ export type AdapterEvents = {
 export type AdapterHandle = {
   ydoc: Y.Doc;
   awareness: Awareness;
-  disconnect: () => void;
+  /** Saves pending edits (waiting up to 5s), then leaves. */
+  disconnect: () => Promise<void>;
   reconnect: () => Promise<void>;
   getPeerCount: () => number;
   getConnectionStatus: () => ConnectionState;
   getUserInfo: () => PeerInfo;
-  forcePersist: () => Promise<void>;
+  /** Resolves once Firebase has acknowledged every pending edit. */
+  flush: () => Promise<void>;
+  hasUnsavedChanges: () => boolean;
+  getSaveState: () => SaveState;
   on: <K extends keyof AdapterEvents>(
     event: K,
     callback: (data: AdapterEvents[K]) => void

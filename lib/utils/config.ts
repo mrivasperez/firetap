@@ -1,38 +1,30 @@
+type PathNames = {
+  rooms: string; // presence
+  signaling: string; // WebRTC offers/answers
+  updates: string; // the document's edit log
+  snapshots: string; // compacted document state
+  meta: string; // document metadata (snapshot generation, merge lease)
+};
+
 export type DatabasePathsConfig = {
   structure: "flat" | "nested";
 
   // Separate roots keyed by docId, e.g. rooms: '/rooms' -> '/rooms/{docId}'.
-  flat?: {
-    documents: string;
-    rooms: string;
-    snapshots: string;
-    signaling: string;
-  };
+  flat?: Partial<PathNames>;
 
-  // For 'nested' structure: all under documents/{{docId}}
+  // Everything under {basePath}/{docId}/; missing sub-paths default to their name.
   nested?: {
     basePath: string; // e.g., '/documents'
-    subPaths: {
-      documents: string; // e.g., 'documents'
-      rooms: string; // e.g., 'rooms'
-      snapshots: string; // e.g., 'snapshots'
-      signaling: string; // e.g., 'signaling'
-    };
+    subPaths?: Partial<PathNames>;
   };
 };
 
 export const DEFAULT_DATABASE_PATHS: DatabasePathsConfig = {
   structure: "nested",
-  nested: {
-    basePath: "/documents",
-    subPaths: {
-      documents: "documents",
-      rooms: "rooms",
-      snapshots: "snapshots",
-      signaling: "signaling",
-    },
-  },
+  nested: { basePath: "/documents" },
 };
+
+const PATH_NAMES: (keyof PathNames)[] = ["rooms", "signaling", "updates", "snapshots", "meta"];
 
 export type ConnectionState = "disconnected" | "connecting" | "connected";
 
@@ -53,28 +45,23 @@ export function validateDocId(docId: string): void {
 export function buildDatabasePaths(
   config: DatabasePathsConfig | undefined,
   docId: string
-) {
+): PathNames {
   validateDocId(docId);
   const resolved = config ?? DEFAULT_DATABASE_PATHS;
+  const paths = {} as PathNames;
   if (resolved.structure === "flat") {
-    if (!resolved.flat) throw new Error("Flat structure requires flat config");
-    return {
-      documents: `${resolved.flat.documents}/${docId}`,
-      rooms: `${resolved.flat.rooms}/${docId}`,
-      snapshots: `${resolved.flat.snapshots}/${docId}`,
-      signaling: `${resolved.flat.signaling}/${docId}`,
-    };
+    for (const name of PATH_NAMES) {
+      paths[name] = `${resolved.flat?.[name] ?? `/${name}`}/${docId}`;
+    }
   } else if (resolved.structure === "nested") {
     if (!resolved.nested)
       throw new Error("Nested structure requires nested config");
     const base = `${resolved.nested.basePath}/${docId}`;
-    return {
-      documents: `${base}/${resolved.nested.subPaths.documents}`,
-      rooms: `${base}/${resolved.nested.subPaths.rooms}`,
-      snapshots: `${base}/${resolved.nested.subPaths.snapshots}`,
-      signaling: `${base}/${resolved.nested.subPaths.signaling}`,
-    };
+    for (const name of PATH_NAMES) {
+      paths[name] = `${base}/${resolved.nested.subPaths?.[name] ?? name}`;
+    }
   } else {
     throw new Error(`Unknown database structure: ${resolved.structure}`);
   }
+  return paths;
 }

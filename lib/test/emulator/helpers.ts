@@ -74,11 +74,14 @@ export async function waitFor<T>(
 export const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms))
 
 export function nestedPaths(basePath: string) {
-  return {
-    structure: 'nested' as const,
-    nested: {
-      basePath,
-      subPaths: { documents: 'documents', rooms: 'rooms', snapshots: 'snapshots', signaling: 'signaling' },
-    },
-  }
+  return { structure: 'nested' as const, nested: { basePath } }
+}
+
+export async function writeRaw(path: string, value: unknown): Promise<void> {
+  const res = await fetch(`http://${emulatorHost()}/${path.replace(/^\//, '')}.json?ns=${NAMESPACE}`, {
+    method: 'PUT',
+    headers: { Authorization: 'Bearer owner' },
+    body: JSON.stringify(value),
+  })
+  if (!res.ok) throw new Error(`Failed to write ${path}: ${res.status}`)
 }

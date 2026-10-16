@@ -7,6 +7,7 @@ export const MSG_UPDATE = 3; // [update]
 export const MSG_AWARENESS = 4; // [awareness update]
 const MSG_CHUNK = 5;
 export const MSG_NEIGHBORS = 6; // [UTF-8 JSON array of the sender's directly connected peer ids]
+export const MSG_PERSISTED = 7; // [UTF-8 JSON {peer, client, clock}]
 
 const MESSAGE_TYPES = new Set([
   MSG_SYNC_STEP1,
@@ -14,6 +15,7 @@ const MESSAGE_TYPES = new Set([
   MSG_UPDATE,
   MSG_AWARENESS,
   MSG_NEIGHBORS,
+  MSG_PERSISTED,
 ]);
 
 export const PROTOCOL_VERSION = 1;

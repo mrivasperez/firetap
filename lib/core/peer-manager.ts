@@ -28,6 +28,7 @@ import {
   MSG_SYNC_STEP2,
   MSG_UPDATE,
   MSG_NEIGHBORS,
+  MSG_PERSISTED,
   PROTOCOL_VERSION,
 } from "./peer-session";
 import {
@@ -76,6 +77,9 @@ export type PeerManagerOptions = {
   databasePaths?: DatabasePathsConfig;
   maxDirectPeers?: number;
   logger?: Logger;
+  onPageHidden?: () => void;
+  onPersisted?: (clientId: number, clock: number) => void;
+  onPeerGone?: (clientIds: number[]) => void;
 };
 
 export class SimplePeerManager {
@@ -122,7 +126,12 @@ export class SimplePeerManager {
   private neighborsOf = new Map<string, Set<string>>();
   private antiEntropyTimer: ReturnType<typeof setInterval> | null = null;
 
-  private persistDocumentSync: (() => void) | null = null;
+  private readonly hooks: Pick<
+    PeerManagerOptions,
+    "onPageHidden" | "onPersisted" | "onPeerGone"
+  >;
+  // Who authored each Yjs client, from awareness and save reports.
+  private clientToPeer = new Map<number, string>();
 
   constructor(options: PeerManagerOptions) {
     this.docId = options.docId;
@@ -134,6 +143,7 @@ export class SimplePeerManager {
     this.databasePaths = options.databasePaths;
     this.maxPeers = Math.max(2, options.maxDirectPeers ?? DEFAULT_MAX_DIRECT_PEERS);
     this.logger = options.logger ?? defaultLogger;
+    this.hooks = options;
   }
 
   emit<K extends keyof AdapterEvents>(event: K, data: AdapterEvents[K]): void {
@@ -225,6 +235,7 @@ export class SimplePeerManager {
         this.presentPeers.delete(otherPeerId);
         this.desiredCache = null;
         this.cancelRetry(otherPeerId);
+        this.reportPeerGone(otherPeerId);
         const entry = this.peers.get(otherPeerId);
         if (entry && entry.pc.connectionState !== "connected") {
           this.cleanupPeerConnection(otherPeerId);
@@ -290,10 +301,6 @@ export class SimplePeerManager {
     }
   }
 
-  setPersistHandler(handler: () => void): void {
-    this.persistDocumentSync = handler;
-  }
-
   getPeerCount(): number {
     let count = 0;
     this.peers.forEach(({ pc }) => {
@@ -313,19 +320,19 @@ export class SimplePeerManager {
   }
 
   private onVisibilityChange = () => {
-    if (!this.running || typeof document === "undefined" || document.hidden) {
-      return;
+    if (!this.running || typeof document === "undefined") return;
+    if (document.hidden) {
+      this.hooks.onPageHidden?.();
+    } else {
+      this.connectMissingPeers();
     }
-    this.connectMissingPeers();
   };
 
+  // No beforeunload listener: prompting is the app's choice, and the listener
+  // can keep pages out of the back/forward cache.
   private onPageHide = () => {
     if (!this.running) return;
-    try {
-      this.persistDocumentSync?.();
-    } catch (error) {
-      this.logger.warn("Error persisting document on unload:", error);
-    }
+    this.hooks.onPageHidden?.();
     // Best effort; onDisconnect covers it if this write never leaves.
     remove(this.presenceRef()).catch(() => {});
   };
@@ -339,7 +346,6 @@ export class SimplePeerManager {
       document.addEventListener("visibilitychange", this.onVisibilityChange);
     }
     if (typeof window !== "undefined") {
-      window.addEventListener("beforeunload", this.onPageHide);
       window.addEventListener("pagehide", this.onPageHide);
       window.addEventListener("online", this.onOnline);
     }
@@ -350,7 +356,6 @@ export class SimplePeerManager {
       document.removeEventListener("visibilitychange", this.onVisibilityChange);
     }
     if (typeof window !== "undefined") {
-      window.removeEventListener("beforeunload", this.onPageHide);
       window.removeEventListener("pagehide", this.onPageHide);
       window.removeEventListener("online", this.onOnline);
     }
@@ -759,6 +764,20 @@ export class SimplePeerManager {
       case MSG_AWARENESS:
         applyAwarenessUpdate(this.awareness, payload, this.originFor(peerId));
         break;
+      case MSG_PERSISTED: {
+        const report = JSON.parse(new TextDecoder().decode(payload));
+        if (
+          typeof report?.peer !== "string" ||
+          !Number.isInteger(report?.client) ||
+          !Number.isInteger(report?.clock)
+        ) {
+          throw new Error("invalid save report");
+        }
+        this.clientToPeer.set(report.client, report.peer);
+        this.hooks.onPersisted?.(report.client, report.clock);
+        this.forward(MSG_PERSISTED, payload, peerId);
+        break;
+      }
       case MSG_NEIGHBORS: {
         const ids = JSON.parse(new TextDecoder().decode(payload));
         if (!Array.isArray(ids)) throw new Error("invalid neighbor list");
@@ -820,6 +839,23 @@ export class SimplePeerManager {
     this.sessions.forEach(({ session }) => session.send(MSG_UPDATE, update));
   }
 
+  broadcastPersisted(clientId: number, clock: number): void {
+    const peer =
+      clientId === this.ydoc.clientID ? this.peerId : this.clientToPeer.get(clientId) ?? "";
+    const payload = new TextEncoder().encode(
+      JSON.stringify({ peer, client: clientId, clock })
+    );
+    for (const [, session] of this.openSessions()) session.send(MSG_PERSISTED, payload);
+  }
+
+  private reportPeerGone(peerId: string): void {
+    const clients: number[] = [];
+    this.clientToPeer.forEach((author, clientId) => {
+      if (author === peerId) clients.push(clientId);
+    });
+    if (clients.length > 0) this.hooks.onPeerGone?.(clients);
+  }
+
   broadcastAwareness(update: Uint8Array): void {
     this.sessions.forEach(({ session }) => session.send(MSG_AWARENESS, update));
   }
@@ -829,6 +865,11 @@ export class SimplePeerManager {
     origin: unknown
   ) => {
     if (!(origin instanceof RemoteOrigin)) return;
+    for (const id of added.concat(updated)) {
+      const author = (this.awareness.getStates().get(id) as { firetap?: { peerId?: unknown } } | undefined)
+        ?.firetap?.peerId;
+      if (typeof author === "string") this.clientToPeer.set(id, author);
+    }
     const changed = added.concat(updated, removed);
     if (changed.length > 0) {
       this.forward(

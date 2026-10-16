@@ -4,30 +4,37 @@ import { buildDatabasePaths, DEFAULT_DATABASE_PATHS, type DatabasePathsConfig } 
 describe('buildDatabasePaths', () => {
   it('defaults to the nested layout', () => {
     expect(buildDatabasePaths(undefined, 'doc-1')).toEqual(buildDatabasePaths(DEFAULT_DATABASE_PATHS, 'doc-1'))
-    expect(buildDatabasePaths(undefined, 'doc-1').snapshots).toBe('/documents/doc-1/snapshots')
+    expect(buildDatabasePaths(undefined, 'doc-1')).toEqual({
+      rooms: '/documents/doc-1/rooms',
+      signaling: '/documents/doc-1/signaling',
+      updates: '/documents/doc-1/updates',
+      snapshots: '/documents/doc-1/snapshots',
+      meta: '/documents/doc-1/meta',
+    })
   })
 
   it('keys every flat root by docId', () => {
-    const flat: DatabasePathsConfig = {
-      structure: 'flat',
-      flat: { documents: '/documents', rooms: '/rooms', snapshots: '/snapshots', signaling: '/signaling' },
-    }
+    const flat: DatabasePathsConfig = { structure: 'flat', flat: { rooms: '/presence' } }
     expect(buildDatabasePaths(flat, 'doc-1')).toEqual({
-      documents: '/documents/doc-1',
-      rooms: '/rooms/doc-1',
-      snapshots: '/snapshots/doc-1',
+      rooms: '/presence/doc-1',
       signaling: '/signaling/doc-1',
+      updates: '/updates/doc-1',
+      snapshots: '/snapshots/doc-1',
+      meta: '/meta/doc-1',
     })
+  })
+
+  it('applies custom nested sub-paths', () => {
+    const nested: DatabasePathsConfig = { structure: 'nested', nested: { basePath: '/ws/docs', subPaths: { updates: 'log' } } }
+    expect(buildDatabasePaths(nested, 'd').updates).toBe('/ws/docs/d/log')
+    expect(buildDatabasePaths(nested, 'd').rooms).toBe('/ws/docs/d/rooms')
   })
 
   it('never gives two documents the same path in any layout', () => {
     const layouts: (DatabasePathsConfig | undefined)[] = [
       undefined,
-      { structure: 'flat', flat: { documents: '/d', rooms: '/r', snapshots: '/s', signaling: '/g' } },
-      {
-        structure: 'nested',
-        nested: { basePath: '/ws/documents', subPaths: { documents: 'd', rooms: 'r', snapshots: 's', signaling: 'g' } },
-      },
+      { structure: 'flat' },
+      { structure: 'nested', nested: { basePath: '/ws/documents' } },
     ]
     for (const layout of layouts) {
       const a = Object.values(buildDatabasePaths(layout, 'doc-a'))
