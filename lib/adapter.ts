@@ -340,17 +340,6 @@ export async function createFirebaseYWebrtcAdapter(
     getPeerCount: () => peerManager.getPeerCount(),
     getConnectionStatus: () => peerManager.getConnectionStatus(),
     getUserInfo: () => peerInfo,
-    getMemoryStats: () => peerManager.getMemoryStats(),
-    forceGarbageCollection: () => {
-      // Y.js handles garbage collection automatically when ydoc.gc = true
-      // GC runs incrementally during document operations - no manual triggering needed
-      // This method is kept for API compatibility but is essentially a no-op
-      logger.debug(
-        "Y.js GC is automatic when ydoc.gc = true (current state:",
-        ydoc.gc,
-        ")"
-      );
-    },
     forcePersist: async () => {
       // Force immediate persistence - useful before critical operations
       try {
@@ -381,9 +370,3 @@ export async function createFirebaseYWebrtcAdapter(
 
 export default createFirebaseYWebrtcAdapter;
 
-// Re-export types for convenience
-export type {
-  AdapterOptions,
-  AdapterEvents,
-  AdapterHandle,
-} from "./core/types";

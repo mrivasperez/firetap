@@ -7,7 +7,6 @@ import type { Logger } from "../utils/logger";
 
 export type AdapterOptions = {
   docId: string;
-  // Firebase database instance (required for dependency injection)
   firebaseDatabase: Database;
   peerId?: string;
   user?: { name?: string };
@@ -17,7 +16,6 @@ export type AdapterOptions = {
   logger?: Partial<Logger>;
 };
 
-// Event types for the adapter
 export type AdapterEvents = {
   "connection-state-changed": { state: ConnectionState };
   "peer-joined": { peerId: string; user: PeerInfo };
@@ -25,7 +23,6 @@ export type AdapterEvents = {
   "document-persisted": { docId: string; version: number };
   error: { error: Error; context: string };
   "sync-completed": { docId: string; updateSize: number };
-  "awareness-updated": { peerId: string; user: PeerInfo };
 };
 
 export type AdapterHandle = {
@@ -36,13 +33,6 @@ export type AdapterHandle = {
   getPeerCount: () => number;
   getConnectionStatus: () => ConnectionState;
   getUserInfo: () => PeerInfo;
-  getMemoryStats: () => {
-    messageBuffer: number;
-    connectionCount: number;
-    lastCleanup: number;
-    awarenessStates: number;
-  };
-  forceGarbageCollection: () => void;
   forcePersist: () => Promise<void>;
   on: <K extends keyof AdapterEvents>(
     event: K,

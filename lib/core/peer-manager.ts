@@ -19,10 +19,7 @@ import { compressData, decompressData } from "../utils/compression";
 import {
   PEER_PRESENCE_TIMEOUT_MS,
   PEER_ID_DISPLAY_LENGTH,
-  MAX_MESSAGE_BUFFER_SIZE,
-  MESSAGE_BUFFER_RETENTION_MS,
   IDLE_PEER_TIMEOUT_MS,
-  MAX_MEMORY_BUFFER_BYTES,
   MAX_AWARENESS_STATES,
   CLEANUP_INTERVAL_MS,
   HEARTBEAT_INTERVAL_MS,
@@ -123,16 +120,9 @@ export class SimplePeerManager {
   private peersAddedListenerUnsubscribe: (() => void) | null = null;
   private peersRemovedListenerUnsubscribe: (() => void) | null = null;
   
-  private memoryStats = {
-    messageBuffer: 0,
-    connectionCount: 0,
-    lastCleanup: Date.now(),
-    awarenessStates: 0,
-  };
+  private lastCleanup = Date.now();
 
   private maxPeers: number; // Prevent too many connections
-  private messageBuffer: Array<{ timestamp: number; size: number }> = [];
-  private maxBufferSize = MAX_MESSAGE_BUFFER_SIZE;
   
   // Chunked message reassembly buffers
   private chunkBuffers = new Map<string, Map<number, { chunk: number[]; totalChunks: number }>>();
@@ -424,10 +414,6 @@ export class SimplePeerManager {
       try {
         // OPTIMIZATION: Use try-catch for JSON parsing to handle malformed messages gracefully
         const message = JSON.parse(event.data);
-        const messageSize = event.data.length;
-
-        // Track message buffer for memory monitoring
-        this.trackMessage(messageSize);
 
         if (message.type === "sync" && message.update) {
           // OPTIMIZATION: Apply remote update with origin to prevent re-broadcasting
@@ -735,34 +721,6 @@ export class SimplePeerManager {
     }
   }
 
-  private trackMessage(size: number): void {
-    const now = Date.now();
-    this.messageBuffer.push({ timestamp: now, size });
-    this.memoryStats.messageBuffer += size;
-
-    // Clean old messages from buffer (keep last hour)
-    const cutoff = now - MESSAGE_BUFFER_RETENTION_MS;
-    while (
-      this.messageBuffer.length > 0 &&
-      this.messageBuffer[0].timestamp < cutoff
-    ) {
-      const old = this.messageBuffer.shift()!;
-      this.memoryStats.messageBuffer -= old.size;
-    }
-
-    // Prevent buffer from growing too large
-    if (this.messageBuffer.length > this.maxBufferSize) {
-      const excess = this.messageBuffer.splice(
-        0,
-        this.messageBuffer.length - this.maxBufferSize
-      );
-      this.memoryStats.messageBuffer -= excess.reduce(
-        (sum, msg) => sum + msg.size,
-        0
-      );
-    }
-  }
-
   private cleanupIdlePeers(): void {
     const now = Date.now();
     const idleTimeout = IDLE_PEER_TIMEOUT_MS;
@@ -770,7 +728,7 @@ export class SimplePeerManager {
     this.peers.forEach((peer, peerId) => {
       if (
         peer.connectionState !== "connected" &&
-        now - this.memoryStats.lastCleanup > idleTimeout
+        now - this.lastCleanup > idleTimeout
       ) {
         peer.close();
         this.peers.delete(peerId);
@@ -779,23 +737,12 @@ export class SimplePeerManager {
       }
     });
 
-    this.memoryStats.lastCleanup = now;
+    this.lastCleanup = now;
   }
 
   private performMemoryCleanup(): void {
     // Clean up idle peers
     this.cleanupIdlePeers();
-
-    // Clear message buffer if too large
-    if (this.memoryStats.messageBuffer > MAX_MEMORY_BUFFER_BYTES) {
-      // 10MB
-      this.logger.warn("Message buffer too large, clearing older messages");
-      this.messageBuffer.splice(0, Math.floor(this.messageBuffer.length / 2));
-      this.memoryStats.messageBuffer = this.messageBuffer.reduce(
-        (sum, msg) => sum + msg.size,
-        0
-      );
-    }
 
     // Clean up awareness states if too many
     const awarenessStates = this.awareness.getStates();
@@ -825,14 +772,6 @@ export class SimplePeerManager {
         this.logger.debug(`Removed ${clientsToRemove.length} stale awareness states`);
       }
     }
-  }
-
-  getMemoryStats() {
-    return {
-      ...this.memoryStats,
-      connectionCount: this.peers.size,
-      awarenessStates: this.awareness.getStates().size,
-    };
   }
 
   private cleanupPeerConnection(peerId: string): void {
@@ -1186,15 +1125,6 @@ export class SimplePeerManager {
       );
       this.visibilityChangeHandler = null;
     }
-
-    // Clear memory tracking
-    this.messageBuffer = [];
-    this.memoryStats = {
-      messageBuffer: 0,
-      connectionCount: 0,
-      lastCleanup: Date.now(),
-      awarenessStates: 0,
-    };
 
     this.connectionStatus = "disconnected";
   }
