@@ -1,4 +1,5 @@
-export const DEFAULT_MAX_DIRECT_PEERS = 20;
+export const DEFAULT_MAX_DIRECT_PEERS = 6;
+export const TOPOLOGY_SETTLE_MS = 200;
 export const PEER_ID_DISPLAY_LENGTH = 6;
 
 export const CONNECT_TIMEOUT_MS = 30_000;

@@ -20,6 +20,7 @@ import {
 
 import { type DatabasePathsConfig, buildDatabasePaths } from "../utils/config";
 import { compressText, decompressText } from "../utils/compression";
+import { desiredNeighbors } from "./topology";
 import {
   PeerSession,
   MSG_AWARENESS,
@@ -39,6 +40,8 @@ import {
   ICE_GATHERING_MAX_MS,
   ICE_SETTLE_MS,
   ANTI_ENTROPY_INTERVAL_MS,
+  DEFAULT_MAX_DIRECT_PEERS,
+  TOPOLOGY_SETTLE_MS,
 } from "../utils/constants";
 import type {
   AdapterEvents,
@@ -100,6 +103,8 @@ export class SimplePeerManager {
   private unsubscribers: Array<() => void> = [];
   private retryTimers = new Map<string, Timer>();
   private retryAttempts = new Map<string, number>();
+  private reconcileTimer: Timer | null = null;
+  private desiredCache: Set<string> | null = null;
 
   private presentPeers = new Map<string, PresenceEntry>();
 
@@ -127,7 +132,7 @@ export class SimplePeerManager {
     this.awareness = options.awareness;
     this.rtdb = options.rtdb;
     this.databasePaths = options.databasePaths;
-    this.maxPeers = options.maxDirectPeers ?? 20;
+    this.maxPeers = Math.max(2, options.maxDirectPeers ?? DEFAULT_MAX_DIRECT_PEERS);
     this.logger = options.logger ?? defaultLogger;
   }
 
@@ -206,10 +211,8 @@ export class SimplePeerManager {
         const otherPeerId = snapshot.key!;
         if (otherPeerId === this.peerId) return;
         this.presentPeers.set(otherPeerId, snapshot.val() as PresenceEntry);
-        if (this.shouldInitiate(otherPeerId)) {
-          this.logger.debug(`New peer detected: ${otherPeerId}, initiating`);
-          this.createPeerConnection(otherPeerId, true);
-        }
+        this.desiredCache = null;
+        this.scheduleReconcile();
       })
     );
     this.unsubscribers.push(
@@ -220,11 +223,13 @@ export class SimplePeerManager {
         // Presence also drops during brief Firebase disconnects, so a live connection
         // is kept; its data channel closes if the peer is really gone.
         this.presentPeers.delete(otherPeerId);
+        this.desiredCache = null;
         this.cancelRetry(otherPeerId);
         const entry = this.peers.get(otherPeerId);
         if (entry && entry.pc.connectionState !== "connected") {
           this.cleanupPeerConnection(otherPeerId);
         }
+        this.scheduleReconcile();
       })
     );
 
@@ -247,6 +252,9 @@ export class SimplePeerManager {
     this.ydoc.off("update", this.onDocUpdate);
     if (this.antiEntropyTimer) clearInterval(this.antiEntropyTimer);
     this.antiEntropyTimer = null;
+    if (this.reconcileTimer) clearTimeout(this.reconcileTimer);
+    this.reconcileTimer = null;
+    this.desiredCache = null;
     this.unsubscribers.splice(0).forEach((unsubscribe) => unsubscribe());
     this.retryTimers.forEach((timer) => clearTimeout(timer));
     this.retryTimers.clear();
@@ -368,13 +376,37 @@ export class SimplePeerManager {
     }
   }
 
-  // The smaller id initiates, so each pair negotiates once.
-  private shouldInitiate(otherPeerId: string): boolean {
-    return this.peerId < otherPeerId;
+  private desiredPeers(): Set<string> {
+    if (!this.desiredCache) {
+      this.desiredCache = desiredNeighbors(
+        this.peerId,
+        this.presentPeers.keys(),
+        this.maxPeers
+      );
+    }
+    return this.desiredCache;
   }
 
-  private connectMissingPeers(): void {
-    this.presentPeers.forEach((_entry, otherPeerId) => {
+  // The smaller id initiates, so each pair negotiates once.
+  private shouldInitiate(otherPeerId: string): boolean {
+    return this.peerId < otherPeerId && this.desiredPeers().has(otherPeerId);
+  }
+
+  // Presence changes arrive in bursts, e.g. when someone joins.
+  private scheduleReconcile(): void {
+    if (this.reconcileTimer || !this.running) return;
+    const runId = this.runId;
+    this.reconcileTimer = setTimeout(() => {
+      this.reconcileTimer = null;
+      if (runId === this.runId) this.reconcile();
+    }, TOPOLOGY_SETTLE_MS);
+  }
+
+  // Existing links are kept when the topology shifts, unless we're over the cap.
+  private reconcile(): void {
+    if (!this.running) return;
+    const desired = this.desiredPeers();
+    desired.forEach((otherPeerId) => {
       if (
         this.shouldInitiate(otherPeerId) &&
         !this.peers.has(otherPeerId) &&
@@ -383,6 +415,22 @@ export class SimplePeerManager {
         this.createPeerConnection(otherPeerId, true);
       }
     });
+
+    let excess = this.peers.size - this.maxPeers;
+    if (excess > 0) {
+      for (const otherPeerId of Array.from(this.peers.keys())) {
+        if (excess <= 0) break;
+        if (!desired.has(otherPeerId)) {
+          this.logger.debug(`Closing link to ${otherPeerId}: no longer needed`);
+          this.cleanupPeerConnection(otherPeerId);
+          excess--;
+        }
+      }
+    }
+  }
+
+  private connectMissingPeers(): void {
+    this.reconcile();
   }
 
   private scheduleRetry(otherPeerId: string): void {
@@ -430,13 +478,6 @@ export class SimplePeerManager {
     connectionId: string = crypto.randomUUID().slice(0, 8)
   ): PeerConnectionEntry | null {
     if (!this.running || this.peers.has(otherPeerId)) return null;
-
-    if (this.peers.size >= this.maxPeers) {
-      this.logger.warn(
-        `Maximum peer connections reached (${this.maxPeers}), rejecting new connection to ${otherPeerId}`
-      );
-      return null;
-    }
 
     const pc = new RTCPeerConnection({ iceServers: STUN_SERVERS });
     const entry: PeerConnectionEntry = {
@@ -603,8 +644,10 @@ export class SimplePeerManager {
         this.logger.debug(`New offer from ${from}, replacing existing connection`);
         this.cleanupPeerConnection(from);
       }
+      // Accept every offer; if that puts us over the cap, reconcile() closes a spare link.
       const entry = this.createPeerConnection(from, false, connectionId);
       if (!entry) return;
+      this.scheduleReconcile();
       const { pc } = entry;
       const isCurrent = () => this.peers.get(from) === entry;
 

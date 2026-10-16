@@ -10,6 +10,7 @@ export type AdapterOptions = {
   peerId?: string;
   user?: { name?: string };
   syncIntervalMs?: number;
+  // Direct WebRTC links per peer (default 6); larger rooms relay through peers.
   maxDirectPeers?: number;
   databasePaths?: DatabasePathsConfig;
   logger?: Partial<Logger>;
