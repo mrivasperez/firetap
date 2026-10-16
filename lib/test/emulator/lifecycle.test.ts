@@ -78,6 +78,23 @@ describe('peer lifecycle', () => {
     expect(Date.now() - started).toBeLessThan(5000)
   })
 
+  it('uses the configured ICE servers', async () => {
+    const iceServers = [{ urls: 'turn:turn.example.com:3478', username: 'u', credential: 'p' }]
+    const basePath = uniqueBasePath('ice')
+    for (let i = 0; i < 2; i++) {
+      open.push(
+        await createFirebaseYWebrtcAdapter({
+          docId: 'doc',
+          firebaseDatabase: createClient(),
+          databasePaths: nestedPaths(basePath),
+          iceServers,
+        })
+      )
+    }
+    await waitFor(() => open.every((a) => a.getPeerCount() === 1), { message: 'connection' })
+    expect(FakeRTCPeerConnection.lastConfig?.iceServers).toEqual(iceServers)
+  })
+
   it('reconnect() restores the connection', async () => {
     const { a, b } = await connectedPair('reconnect')
     await a.reconnect()

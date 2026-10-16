@@ -20,6 +20,9 @@ export type AdapterOptions = {
   // Keep the last downloaded snapshot in IndexedDB so reopening skips the download
   // (default true). Turn off if document content mustn't stay on the device.
   localCache?: boolean;
+  // STUN/TURN servers for WebRTC (default: Google's public STUN servers). Add a TURN
+  // server so peers behind strict firewalls can still connect directly.
+  iceServers?: RTCIceServer[];
   logger?: Partial<Logger>;
 };
 

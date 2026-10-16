@@ -15,7 +15,9 @@ import {
   PEER_ID_DISPLAY_LENGTH,
   PEER_LOAD_TIMEOUT_MS,
   AWARENESS_THROTTLE_MS,
+  STUN_SERVERS,
 } from "./utils/constants";
+import { randomId } from "./utils/id";
 import { resolveLogger } from "./utils/logger";
 import { buildDatabasePaths, validateDocId } from "./utils/config";
 import { SnapshotCache } from "./utils/snapshot-cache";
@@ -32,13 +34,14 @@ export async function createFirebaseYWebrtcAdapter(
   const {
     docId,
     firebaseDatabase,
-    peerId = crypto.randomUUID(),
+    peerId = randomId(),
     user = {},
     persistDebounceMs,
     maxDirectPeers = DEFAULT_MAX_DIRECT_PEERS,
     databasePaths,
     firebaseFallback = "auto",
     localCache = true,
+    iceServers = STUN_SERVERS,
     logger: loggerOption,
   } = opts;
   const logger = resolveLogger(loggerOption);
@@ -63,6 +66,7 @@ export async function createFirebaseYWebrtcAdapter(
     rtdb: firebaseDatabase,
     databasePaths,
     maxDirectPeers,
+    iceServers,
     logger,
     // On mobile, hidden is often the last chance to save.
     onPageHidden: () => {

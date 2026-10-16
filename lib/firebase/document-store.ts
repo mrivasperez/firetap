@@ -19,6 +19,7 @@ import { base64ToUint8Array, uint8ArrayToBase64 } from "../utils/base64";
 import { compressBytes, decompressBytes } from "../utils/compression";
 import { defaultLogger, type Logger } from "../utils/logger";
 import type { SnapshotCache } from "../utils/snapshot-cache";
+import { randomId } from "../utils/id";
 import {
   DEFAULT_PERSIST_DEBOUNCE_MS,
   LOAD_MAX_ATTEMPTS,
@@ -351,7 +352,7 @@ export class DocumentStore {
     const parts = splitString(encoded, STORED_PART_CHARS);
     const newGeneration = base.generation + 1;
     // Unique per attempt, so a client that loses the race can't overwrite the winner's parts.
-    const snapshotKey = `${newGeneration}-${crypto.randomUUID().slice(0, 8)}`;
+    const snapshotKey = `${newGeneration}-${randomId().slice(0, 8)}`;
 
     const snapshotRef = ref(rtdb, `${paths.snapshots}/${snapshotKey}`);
     try {

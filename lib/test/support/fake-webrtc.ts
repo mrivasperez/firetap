@@ -74,6 +74,7 @@ export class FakeRTCPeerConnection extends EventTarget {
   /** When > 0, a server-reflexive candidate arrives at once but gathering only
    * completes after this long, like with an unreachable STUN server. */
   static gatheringCompleteMs = 0
+  static lastConfig: RTCConfiguration | undefined
 
   readonly id = `fake-${++FakeRTCPeerConnection.created}`
   connectionState: RTCPeerConnectionState = 'new'
@@ -87,8 +88,9 @@ export class FakeRTCPeerConnection extends EventTarget {
   private remoteId: string | null = null
   private gatheringTimers: ReturnType<typeof setTimeout>[] = []
 
-  constructor(_config?: unknown) {
+  constructor(config?: RTCConfiguration) {
     super()
+    FakeRTCPeerConnection.lastConfig = config
     FakeRTCPeerConnection.registry.set(this.id, this)
   }
 

@@ -34,7 +34,6 @@ import {
 } from "./peer-session";
 import {
   PEER_ID_DISPLAY_LENGTH,
-  STUN_SERVERS,
   CONNECT_TIMEOUT_MS,
   DISCONNECT_GRACE_MS,
   RETRY_BASE_MS,
@@ -55,6 +54,7 @@ import type {
 } from "./types";
 import type { ConnectionState } from "../utils/config";
 import { defaultLogger, type Logger } from "../utils/logger";
+import { randomId } from "../utils/id";
 
 type Timer = ReturnType<typeof setTimeout>;
 
@@ -79,6 +79,7 @@ export type PeerManagerOptions = {
   rtdb: Database;
   databasePaths?: DatabasePathsConfig;
   maxDirectPeers?: number;
+  iceServers?: RTCIceServer[];
   logger?: Logger;
   onPageHidden?: () => void;
   onPersisted?: (clientId: number, clock: number) => void;
@@ -96,6 +97,7 @@ export class SimplePeerManager {
   private databasePaths: DatabasePathsConfig | undefined;
   private rtdb: Database;
   private maxPeers: number;
+  private iceServers: RTCIceServer[];
   private logger: Logger;
 
   private eventListeners: Map<
@@ -156,6 +158,7 @@ export class SimplePeerManager {
     this.databasePaths = options.databasePaths;
     this.maxPeers = Math.max(2, options.maxDirectPeers ?? DEFAULT_MAX_DIRECT_PEERS);
     this.logger = options.logger ?? defaultLogger;
+    this.iceServers = options.iceServers ?? [];
     this.hooks = options;
   }
 
@@ -496,11 +499,11 @@ export class SimplePeerManager {
   private createPeerConnection(
     otherPeerId: string,
     initiator: boolean,
-    connectionId: string = crypto.randomUUID().slice(0, 8)
+    connectionId: string = randomId().slice(0, 8)
   ): PeerConnectionEntry | null {
     if (!this.running || this.peers.has(otherPeerId)) return null;
 
-    const pc = new RTCPeerConnection({ iceServers: STUN_SERVERS });
+    const pc = new RTCPeerConnection({ iceServers: this.iceServers });
     const entry: PeerConnectionEntry = {
       pc,
       connectionId,
