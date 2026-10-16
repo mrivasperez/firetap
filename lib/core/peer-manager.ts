@@ -26,6 +26,7 @@ import {
   MSG_SYNC_STEP1,
   MSG_SYNC_STEP2,
   MSG_UPDATE,
+  MSG_NEIGHBORS,
   PROTOCOL_VERSION,
 } from "./peer-session";
 import {
@@ -37,6 +38,7 @@ import {
   RETRY_MAX_MS,
   ICE_GATHERING_MAX_MS,
   ICE_SETTLE_MS,
+  ANTI_ENTROPY_INTERVAL_MS,
 } from "../utils/constants";
 import type {
   AdapterEvents,
@@ -110,6 +112,10 @@ export class SimplePeerManager {
 
   // Peers relay each other's cursors, so track which clients came from each peer.
   private awarenessClientsByPeer = new Map<string, Set<number>>();
+
+  // Relays skip peers the original sender is already connected to.
+  private neighborsOf = new Map<string, Set<string>>();
+  private antiEntropyTimer: ReturnType<typeof setInterval> | null = null;
 
   private persistDocumentSync: (() => void) | null = null;
 
@@ -223,6 +229,11 @@ export class SimplePeerManager {
     );
 
     this.awareness.on("update", this.onAwarenessUpdate);
+    this.ydoc.on("update", this.onDocUpdate);
+    this.antiEntropyTimer = setInterval(
+      () => this.syncWithNeighbors(),
+      ANTI_ENTROPY_INTERVAL_MS
+    );
     this.addPageListeners();
   }
 
@@ -233,6 +244,9 @@ export class SimplePeerManager {
 
     this.removePageListeners();
     this.awareness.off("update", this.onAwarenessUpdate);
+    this.ydoc.off("update", this.onDocUpdate);
+    if (this.antiEntropyTimer) clearInterval(this.antiEntropyTimer);
+    this.antiEntropyTimer = null;
     this.unsubscribers.splice(0).forEach((unsubscribe) => unsubscribe());
     this.retryTimers.forEach((timer) => clearTimeout(timer));
     this.retryTimers.clear();
@@ -537,6 +551,8 @@ export class SimplePeerManager {
     }
 
     this.removePeerAwareness(otherPeerId);
+    this.neighborsOf.delete(otherPeerId);
+    if (current && this.running) this.announceNeighbors();
 
     if (entry?.wasConnected) {
       this.emit("peer-left", { peerId: otherPeerId });
@@ -660,6 +676,7 @@ export class SimplePeerManager {
         session.send(MSG_AWARENESS, encodeAwarenessUpdate(this.awareness, clients));
       }
       session.flush();
+      this.announceNeighbors();
     };
 
     channel.onmessage = (event) => session.receive(event.data as ArrayBuffer);
@@ -699,8 +716,61 @@ export class SimplePeerManager {
       case MSG_AWARENESS:
         applyAwarenessUpdate(this.awareness, payload, this.originFor(peerId));
         break;
+      case MSG_NEIGHBORS: {
+        const ids = JSON.parse(new TextDecoder().decode(payload));
+        if (!Array.isArray(ids)) throw new Error("invalid neighbor list");
+        const previous = this.neighborsOf.get(peerId);
+        const next = new Set<string>(ids.filter((id) => typeof id === "string"));
+        this.neighborsOf.set(peerId, next);
+        // That peer lost a link, so a relay we skipped may not have reached its target.
+        if (previous && Array.from(previous).some((id) => !next.has(id))) {
+          this.syncWithNeighbors();
+        }
+        break;
+      }
     }
   }
+
+  private openSessions(): Array<[string, PeerSession]> {
+    const open: Array<[string, PeerSession]> = [];
+    this.sessions.forEach(({ channel, session }, peerId) => {
+      if (channel.readyState === "open") open.push([peerId, session]);
+    });
+    return open;
+  }
+
+  private announceNeighbors(): void {
+    const open = this.openSessions();
+    const payload = new TextEncoder().encode(JSON.stringify(open.map(([id]) => id)));
+    for (const [, session] of open) session.send(MSG_NEIGHBORS, payload);
+  }
+
+  // Each neighbor answers our state vector with anything we lack.
+  private syncWithNeighbors(): void {
+    const stateVector = Y.encodeStateVector(this.ydoc);
+    const payload = new Uint8Array(1 + stateVector.length);
+    payload[0] = PROTOCOL_VERSION;
+    payload.set(stateVector, 1);
+    for (const [, session] of this.openSessions()) {
+      session.send(MSG_SYNC_STEP1, payload);
+    }
+  }
+
+  private forward(type: number, payload: Uint8Array, sourcePeerId: string): void {
+    const sourceNeighbors = this.neighborsOf.get(sourcePeerId);
+    for (const [peerId, session] of this.openSessions()) {
+      if (peerId !== sourcePeerId && !sourceNeighbors?.has(peerId)) {
+        session.send(type, payload);
+      }
+    }
+  }
+
+  // Yjs only emits updates that were new to us, so relaying stops on its own.
+  private onDocUpdate = (update: Uint8Array, origin: unknown) => {
+    if (origin instanceof RemoteOrigin) {
+      this.forward(MSG_UPDATE, update, origin.peerId);
+    }
+  };
 
   broadcastUpdate(update: Uint8Array): void {
     if (update.length < 3) return;
@@ -716,6 +786,14 @@ export class SimplePeerManager {
     origin: unknown
   ) => {
     if (!(origin instanceof RemoteOrigin)) return;
+    const changed = added.concat(updated, removed);
+    if (changed.length > 0) {
+      this.forward(
+        MSG_AWARENESS,
+        encodeAwarenessUpdate(this.awareness, changed),
+        origin.peerId
+      );
+    }
     let clients = this.awarenessClientsByPeer.get(origin.peerId);
     if (!clients) {
       clients = new Set();

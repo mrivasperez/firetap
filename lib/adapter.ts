@@ -138,8 +138,8 @@ export async function createFirebaseYWebrtcAdapter(
       },
       origin: unknown
     ) => {
-      // Removing a departed peer's cursors is local; others may still reach it.
-      if (origin === "peer-left") return;
+      // Peers relay remote changes; removing a departed peer's cursors stays local.
+      if (origin !== "local") return;
       const changedClients = added.concat(updated, removed);
 
       // Collect all changed client IDs

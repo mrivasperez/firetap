@@ -6,6 +6,15 @@ export const MSG_SYNC_STEP2 = 2; // [update containing what the other side is mi
 export const MSG_UPDATE = 3; // [update]
 export const MSG_AWARENESS = 4; // [awareness update]
 const MSG_CHUNK = 5;
+export const MSG_NEIGHBORS = 6; // [UTF-8 JSON array of the sender's directly connected peer ids]
+
+const MESSAGE_TYPES = new Set([
+  MSG_SYNC_STEP1,
+  MSG_SYNC_STEP2,
+  MSG_UPDATE,
+  MSG_AWARENESS,
+  MSG_NEIGHBORS,
+]);
 
 export const PROTOCOL_VERSION = 1;
 
@@ -161,7 +170,7 @@ export class PeerSession {
 
   private deliver(frame: Uint8Array): void {
     const type = frame[0];
-    if (type < MSG_SYNC_STEP1 || type > MSG_AWARENESS) {
+    if (!MESSAGE_TYPES.has(type)) {
       return this.fail(`unknown message type ${type}`);
     }
     try {

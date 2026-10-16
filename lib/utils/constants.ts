@@ -7,6 +7,7 @@ export const RETRY_BASE_MS = 2_000;
 export const RETRY_MAX_MS = 60_000;
 export const ICE_GATHERING_MAX_MS = 3_000;
 export const ICE_SETTLE_MS = 300;
+export const ANTI_ENTROPY_INTERVAL_MS = 30_000;
 
 export const DEFAULT_SYNC_INTERVAL_MS = 30_000;
 
