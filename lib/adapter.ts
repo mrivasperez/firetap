@@ -6,11 +6,6 @@ import {
   startPeriodicPersistence,
 } from "./firebase/persistence";
 import {
-  announcePresence,
-  stopAnnouncingPresence,
-  type PeerInfo,
-} from "./firebase/presence";
-import {
   encodeAwarenessUpdate,
   removeAwarenessStates,
 } from "y-protocols/awareness";
@@ -19,6 +14,7 @@ import type {
   AdapterOptions,
   AdapterEvents,
   AdapterHandle,
+  PeerInfo,
 } from "./core/types";
 import {
   DEFAULT_SYNC_INTERVAL_MS,
@@ -77,24 +73,22 @@ export async function createFirebaseYWebrtcAdapter(
     logger.warn("Failed to load persisted Y document from Firebase", e);
   }
 
-  // 3) Create peer info for Firebase presence
   const peerInfo: PeerInfo = {
     id: peerId,
     name: user.name || `User-${peerId.slice(0, PEER_ID_DISPLAY_LENGTH)}`,
     connectedAt: Date.now(),
   };
 
-  // 4) Create SimplePeer manager
-  const peerManager = new SimplePeerManager(
+  const peerManager = new SimplePeerManager({
     docId,
-    peerId,
+    peer: peerInfo,
     ydoc,
     awareness,
-    firebaseDatabase,
+    rtdb: firebaseDatabase,
     databasePaths,
     maxDirectPeers,
-    logger
-  );
+    logger,
+  });
 
   // 5) Set up Y.js event handlers with origin tracking and throttling
   // Origin tracking prevents broadcasting updates that came from remote peers
@@ -185,28 +179,6 @@ export async function createFirebaseYWebrtcAdapter(
     name: peerInfo.name,
     id: peerId,
   });
-
-  // 7) Announce presence in Firebase
-  let presenceCleanup: (() => void) | null = null;
-  try {
-    await announcePresence(
-      firebaseDatabase,
-      docId,
-      peerInfo,
-      databasePaths,
-      logger
-    );
-    presenceCleanup = () =>
-      stopAnnouncingPresence(
-        firebaseDatabase,
-        docId,
-        peerId,
-        databasePaths,
-        logger
-      );
-  } catch (e) {
-    logger.warn("Failed to announce presence in Firebase:", e);
-  }
 
   // 8) Start periodic persistence
   const stopPersistence = startPeriodicPersistence(
@@ -311,11 +283,6 @@ export async function createFirebaseYWebrtcAdapter(
       stopPersistence();
     } catch (e) {
       logger.warn("Persistence stop error:", e);
-    }
-    try {
-      presenceCleanup?.();
-    } catch (e) {
-      logger.warn("Presence cleanup error:", e);
     }
     try {
       // Destroy awareness first (before document cleanup)

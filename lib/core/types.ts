@@ -1,7 +1,6 @@
 import type { Database } from "firebase/database";
 import * as Y from "yjs";
 import { Awareness } from "y-protocols/awareness";
-import type { PeerInfo } from "../firebase/presence";
 import type { DatabasePathsConfig, ConnectionState } from "../utils/config";
 import type { Logger } from "../utils/logger";
 
@@ -44,9 +43,21 @@ export type AdapterHandle = {
   ) => void;
 };
 
+export type PeerInfo = {
+  id: string;
+  name: string;
+  connectedAt: number;
+};
+
+export type PresenceEntry = {
+  name: string;
+  connectedAt: number | object; // server timestamp
+};
+
 export type SignalData = {
   type: "offer" | "answer";
-  sdp?: RTCSessionDescriptionInit;
+  sdp?: string;
+  sdpGz?: string;
   from: string;
   to: string;
   // Lets the initiator ignore a late answer to an offer it has replaced.

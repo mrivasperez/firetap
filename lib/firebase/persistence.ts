@@ -3,6 +3,7 @@ import type { Database } from 'firebase/database'
 import { ref, set, get, serverTimestamp } from 'firebase/database'
 import { buildDatabasePaths, type DatabasePathsConfig } from '../utils/config'
 import { defaultLogger, type Logger } from '../utils/logger'
+import { base64ToUint8Array, uint8ArrayToBase64 } from '../utils/base64'
 
 // ============================================================================
 // CONSTANTS
@@ -176,24 +177,6 @@ export async function persistDocument(rtdb: Database, ydoc: Y.Doc, docId: string
     logger.error('Failed to persist document:', error)
     throw error
   }
-}
-
-// Utility functions
-function uint8ArrayToBase64(uint8Array: Uint8Array): string {
-  // Handle large arrays by processing in chunks to avoid "too many arguments" error
-  const CHUNK_SIZE = 8192; // 8KB chunks - safe for function call stack
-  let binary = '';
-  
-  for (let i = 0; i < uint8Array.length; i += CHUNK_SIZE) {
-    const chunk = uint8Array.subarray(i, Math.min(i + CHUNK_SIZE, uint8Array.length));
-    binary += String.fromCharCode(...chunk);
-  }
-  
-  return btoa(binary);
-}
-
-function base64ToUint8Array(base64: string): Uint8Array {
-  return Uint8Array.from(atob(base64), (c) => c.charCodeAt(0));
 }
 
 async function calculateChecksum(data: Uint8Array): Promise<string> {

@@ -1,6 +1,5 @@
 import * as Y from "yjs";
 import { Awareness } from "y-protocols/awareness";
-import { cleanupStalePeers } from "../firebase/presence";
 import type { Database } from "firebase/database";
 import {
   ref,
@@ -10,21 +9,21 @@ import {
   onChildAdded,
   onChildRemoved,
   onDisconnect,
+  onValue,
+  serverTimestamp,
 } from "firebase/database";
-import {
-  applyAwarenessUpdate,
-  removeAwarenessStates,
-} from "y-protocols/awareness";
+import { applyAwarenessUpdate } from "y-protocols/awareness";
 
 import { type DatabasePathsConfig, buildDatabasePaths } from "../utils/config";
-import { compressData, decompressData } from "../utils/compression";
 import {
-  PEER_PRESENCE_TIMEOUT_MS,
+  compressData,
+  decompressData,
+  compressText,
+  decompressText,
+} from "../utils/compression";
+import {
   PEER_ID_DISPLAY_LENGTH,
   MAX_AWARENESS_STATES,
-  CLEANUP_INTERVAL_MS,
-  HEARTBEAT_INTERVAL_MS,
-  MIN_VISIBILITY_UPDATE_INTERVAL,
   STUN_SERVERS,
   MAX_CHUNK_SIZE,
   CHUNK_HEADER_SIZE,
@@ -35,7 +34,13 @@ import {
   ICE_GATHERING_MAX_MS,
   ICE_SETTLE_MS,
 } from "../utils/constants";
-import type { AdapterEvents, SignalData } from "./types";
+import type {
+  AdapterEvents,
+  PeerInfo,
+  PresenceEntry,
+  SignalData,
+} from "./types";
+import type { ConnectionState } from "../utils/config";
 import { defaultLogger, type Logger } from "../utils/logger";
 
 type Timer = ReturnType<typeof setTimeout>;
@@ -49,8 +54,20 @@ type PeerConnectionEntry = {
   disconnectTimer: Timer | null;
 };
 
+export type PeerManagerOptions = {
+  docId: string;
+  peer: PeerInfo;
+  ydoc: Y.Doc;
+  awareness: Awareness;
+  rtdb: Database;
+  databasePaths?: DatabasePathsConfig;
+  maxDirectPeers?: number;
+  logger?: Logger;
+};
+
 export class SimplePeerManager {
   private docId: string;
+  private peer: PeerInfo;
   private peerId: string;
   private ydoc: Y.Doc;
   private awareness: Awareness;
@@ -68,15 +85,13 @@ export class SimplePeerManager {
   private running = false;
   private destroyed = false;
   private runId = 0;
-  private connectionStatus: "connecting" | "connected" | "disconnected" =
-    "connecting";
+  private connectionStatus: ConnectionState = "connecting";
 
   private unsubscribers: Array<() => void> = [];
-  private intervals: Array<ReturnType<typeof setInterval>> = [];
   private retryTimers = new Map<string, Timer>();
   private retryAttempts = new Map<string, number>();
 
-  private presentPeers = new Set<string>();
+  private presentPeers = new Map<string, PresenceEntry>();
 
   // WebRTC peer connections
   private peers = new Map<string, PeerConnectionEntry>();
@@ -88,28 +103,18 @@ export class SimplePeerManager {
     Map<number, { chunk: number[]; totalChunks: number }>
   >();
 
-  private pendingPresenceUpdate: Promise<void> | null = null;
-  private lastVisibilityUpdate = 0;
   private persistDocumentSync: (() => void) | null = null;
 
-  constructor(
-    docId: string,
-    peerId: string,
-    ydoc: Y.Doc,
-    awareness: Awareness,
-    rtdb: Database,
-    databasePaths: DatabasePathsConfig | undefined,
-    maxDirectPeers: number = 20,
-    logger: Logger = defaultLogger
-  ) {
-    this.docId = docId;
-    this.peerId = peerId;
-    this.ydoc = ydoc;
-    this.awareness = awareness;
-    this.rtdb = rtdb;
-    this.databasePaths = databasePaths;
-    this.maxPeers = maxDirectPeers;
-    this.logger = logger;
+  constructor(options: PeerManagerOptions) {
+    this.docId = options.docId;
+    this.peer = options.peer;
+    this.peerId = options.peer.id;
+    this.ydoc = options.ydoc;
+    this.awareness = options.awareness;
+    this.rtdb = options.rtdb;
+    this.databasePaths = options.databasePaths;
+    this.maxPeers = options.maxDirectPeers ?? 20;
+    this.logger = options.logger ?? defaultLogger;
   }
 
   emit<K extends keyof AdapterEvents>(event: K, data: AdapterEvents[K]): void {
@@ -152,12 +157,28 @@ export class SimplePeerManager {
     this.running = true;
     const runId = ++this.runId;
     const paths = this.getPaths();
+    this.setConnectionStatus("connecting");
+
+    // On every (re)connect: register onDisconnect cleanup, then announce ourselves.
+    this.unsubscribers.push(
+      onValue(ref(this.rtdb, ".info/connected"), (snapshot) => {
+        if (runId !== this.runId) return;
+        if (snapshot.val() === true) {
+          this.setConnectionStatus("connected");
+          this.announcePresence(runId);
+        } else if (this.connectionStatus === "connected") {
+          this.setConnectionStatus("disconnected");
+        }
+      })
+    );
 
     const signalingRef = ref(this.rtdb, `${paths.signaling}/${this.peerId}`);
     this.unsubscribers.push(
       onChildAdded(signalingRef, (snapshot) => {
         if (runId !== this.runId) return;
-        this.handleSignalData(snapshot.val() as SignalData);
+        this.handleSignalData(snapshot.val() as SignalData).catch((error) =>
+          this.logger.warn("Failed to handle signal:", error)
+        );
         remove(snapshot.ref).catch((error) =>
           this.logger.warn(`Failed to remove signal ${snapshot.key}:`, error)
         );
@@ -170,14 +191,7 @@ export class SimplePeerManager {
         if (runId !== this.runId) return;
         const otherPeerId = snapshot.key!;
         if (otherPeerId === this.peerId) return;
-        const peerData = snapshot.val();
-        if (
-          !peerData?.lastSeen ||
-          Date.now() - peerData.lastSeen >= PEER_PRESENCE_TIMEOUT_MS
-        ) {
-          return;
-        }
-        this.presentPeers.add(otherPeerId);
+        this.presentPeers.set(otherPeerId, snapshot.val() as PresenceEntry);
         if (this.shouldInitiate(otherPeerId)) {
           this.logger.debug(`New peer detected: ${otherPeerId}, initiating`);
           this.createPeerConnection(otherPeerId, true);
@@ -189,25 +203,18 @@ export class SimplePeerManager {
         if (runId !== this.runId) return;
         const otherPeerId = snapshot.key!;
         if (otherPeerId === this.peerId) return;
+        // Presence also drops during brief Firebase disconnects, so a live connection
+        // is kept; its data channel closes if the peer is really gone.
         this.presentPeers.delete(otherPeerId);
         this.cancelRetry(otherPeerId);
-        if (this.peers.has(otherPeerId)) {
-          this.logger.debug(`Peer ${otherPeerId} left, closing connection`);
+        const entry = this.peers.get(otherPeerId);
+        if (entry && entry.pc.connectionState !== "connected") {
           this.cleanupPeerConnection(otherPeerId);
         }
       })
     );
 
-    this.intervals.push(
-      setInterval(() => this.periodicCleanup(runId), CLEANUP_INTERVAL_MS),
-      setInterval(() => {
-        this.updatePresence(runId).catch(() => {});
-      }, HEARTBEAT_INTERVAL_MS)
-    );
-    this.updatePresence(runId).catch(() => {});
-
     this.addPageListeners();
-    this.connectionStatus = "connected";
   }
 
   stop(): void {
@@ -217,7 +224,6 @@ export class SimplePeerManager {
 
     this.removePageListeners();
     this.unsubscribers.splice(0).forEach((unsubscribe) => unsubscribe());
-    this.intervals.splice(0).forEach((interval) => clearInterval(interval));
     this.retryTimers.forEach((timer) => clearTimeout(timer));
     this.retryTimers.clear();
     this.retryAttempts.clear();
@@ -228,12 +234,13 @@ export class SimplePeerManager {
     this.presentPeers.clear();
     this.chunkBuffers.clear();
 
-    const peerRef = ref(this.rtdb, `${this.getPaths().rooms}/peers/${this.peerId}`);
+    // onDisconnect stays registered in case this write doesn't reach the server.
+    const peerRef = this.presenceRef();
     remove(peerRef).catch((error) =>
       this.logger.warn("Failed to remove own presence:", error)
     );
 
-    this.connectionStatus = "disconnected";
+    this.setConnectionStatus("disconnected");
   }
 
   destroy(): void {
@@ -242,16 +249,12 @@ export class SimplePeerManager {
   }
 
   async reconnect(): Promise<void> {
-    this.connectionStatus = "connecting";
-    this.emit("connection-state-changed", { state: "connecting" });
     try {
       this.stop();
       await this.start();
-      this.emit("connection-state-changed", { state: "connected" });
     } catch (error) {
-      this.connectionStatus = "disconnected";
+      this.setConnectionStatus("disconnected");
       this.emit("error", { error: error as Error, context: "reconnection" });
-      this.emit("connection-state-changed", { state: "disconnected" });
       throw error;
     }
   }
@@ -268,18 +271,19 @@ export class SimplePeerManager {
     return count;
   }
 
-  getConnectionStatus(): "connecting" | "connected" | "disconnected" {
+  getConnectionStatus(): ConnectionState {
     return this.connectionStatus;
+  }
+
+  private setConnectionStatus(state: ConnectionState): void {
+    if (this.connectionStatus === state) return;
+    this.connectionStatus = state;
+    this.emit("connection-state-changed", { state });
   }
 
   private onVisibilityChange = () => {
     if (!this.running || typeof document === "undefined" || document.hidden) {
       return;
-    }
-    const now = Date.now();
-    if (now - this.lastVisibilityUpdate > MIN_VISIBILITY_UPDATE_INTERVAL) {
-      this.lastVisibilityUpdate = now;
-      this.updatePresence(this.runId).catch(() => {});
     }
     this.connectMissingPeers();
   };
@@ -292,8 +296,7 @@ export class SimplePeerManager {
       this.logger.warn("Error persisting document on unload:", error);
     }
     // Best effort; onDisconnect covers it if this write never leaves.
-    const peerRef = ref(this.rtdb, `${this.getPaths().rooms}/peers/${this.peerId}`);
-    remove(peerRef).catch(() => {});
+    remove(this.presenceRef()).catch(() => {});
   };
 
   private onOnline = () => {
@@ -322,40 +325,24 @@ export class SimplePeerManager {
     }
   }
 
-  private async updatePresence(runId: number): Promise<void> {
-    if (runId !== this.runId) return;
-
-    if (this.pendingPresenceUpdate) {
-      await this.pendingPresenceUpdate.catch(() => {});
-    }
-    if (runId !== this.runId) return;
-
-    this.pendingPresenceUpdate = (async () => {
-      try {
-        const peerRef = ref(
-          this.rtdb,
-          `${this.getPaths().rooms}/peers/${this.peerId}`
-        );
-        await onDisconnect(peerRef).remove();
-        if (runId !== this.runId) return;
-        await set(peerRef, { id: this.peerId, lastSeen: Date.now() });
-      } catch (error) {
-        this.logger.warn("Failed to update heartbeat:", error);
-        throw error;
-      } finally {
-        this.pendingPresenceUpdate = null;
-      }
-    })();
-    return this.pendingPresenceUpdate;
+  private presenceRef() {
+    return ref(this.rtdb, `${this.getPaths().rooms}/peers/${this.peerId}`);
   }
 
-  private periodicCleanup(runId: number): void {
-    if (runId !== this.runId) return;
-    cleanupStalePeers(this.rtdb, this.docId, this.databasePaths, this.logger)
-      .catch((error) =>
-        this.logger.warn("Failed to cleanup stale peers from Firebase:", error)
-      );
-    this.cleanupAwarenessStates();
+  private async announcePresence(runId: number): Promise<void> {
+    const peerRef = this.presenceRef();
+    try {
+      await onDisconnect(peerRef).remove();
+      if (runId !== this.runId) return;
+      const entry: PresenceEntry = {
+        name: this.peer.name,
+        connectedAt: serverTimestamp(),
+      };
+      await set(peerRef, entry);
+    } catch (error) {
+      this.logger.warn("Failed to announce presence:", error);
+      this.emit("error", { error: error as Error, context: "presence" });
+    }
   }
 
   // The smaller id initiates, so each pair negotiates once.
@@ -364,7 +351,7 @@ export class SimplePeerManager {
   }
 
   private connectMissingPeers(): void {
-    this.presentPeers.forEach((otherPeerId) => {
+    this.presentPeers.forEach((_entry, otherPeerId) => {
       if (
         this.shouldInitiate(otherPeerId) &&
         !this.peers.has(otherPeerId) &&
@@ -459,12 +446,18 @@ export class SimplePeerManager {
         this.retryAttempts.delete(otherPeerId);
         if (!entry.wasConnected) {
           entry.wasConnected = true;
+          const presence = this.presentPeers.get(otherPeerId);
           this.emit("peer-joined", {
             peerId: otherPeerId,
             user: {
               id: otherPeerId,
-              name: `User-${otherPeerId.slice(0, PEER_ID_DISPLAY_LENGTH)}`,
-              connectedAt: Date.now(),
+              name:
+                presence?.name ??
+                `User-${otherPeerId.slice(0, PEER_ID_DISPLAY_LENGTH)}`,
+              connectedAt:
+                typeof presence?.connectedAt === "number"
+                  ? presence.connectedAt
+                  : Date.now(),
             },
           });
         }
@@ -550,9 +543,11 @@ export class SimplePeerManager {
     description: RTCSessionDescriptionInit,
     connectionId: string
   ): Promise<void> {
+    const sdp = description.sdp ?? "";
+    const sdpGz = await compressText(sdp).catch(() => null);
     const signalData: SignalData = {
       type,
-      sdp: { type: description.type!, sdp: description.sdp! },
+      ...(sdpGz ? { sdpGz } : { sdp }),
       from: this.peerId,
       to: targetPeerId,
       connectionId,
@@ -565,9 +560,21 @@ export class SimplePeerManager {
     this.logger.debug(`Sent ${type} to ${targetPeerId}`);
   }
 
-  private handleSignalData(signalData: SignalData): void {
+  private async handleSignalData(signalData: SignalData): Promise<void> {
     const { from, type, connectionId } = signalData;
-    if (!this.running || !from || !signalData.sdp) return;
+    if (!this.running || !from) return;
+
+    let sdp: string;
+    try {
+      sdp = signalData.sdpGz
+        ? await decompressText(signalData.sdpGz)
+        : signalData.sdp ?? "";
+    } catch (error) {
+      this.logger.warn(`Ignoring unreadable signal from ${from}:`, error);
+      return;
+    }
+    if (!sdp || !this.running) return;
+    const description = new RTCSessionDescription({ type, sdp });
 
     if (type === "offer") {
       // A new offer means the initiator started over, e.g. after a failure.
@@ -580,7 +587,7 @@ export class SimplePeerManager {
       const { pc } = entry;
       const isCurrent = () => this.peers.get(from) === entry;
 
-      pc.setRemoteDescription(new RTCSessionDescription(signalData.sdp))
+      pc.setRemoteDescription(description)
         .then(() => pc.createAnswer())
         .then((answer) => pc.setLocalDescription(answer))
         .then(() => waitForIceGathering(pc))
@@ -603,7 +610,7 @@ export class SimplePeerManager {
         return;
       }
       entry.pc
-        .setRemoteDescription(new RTCSessionDescription(signalData.sdp))
+        .setRemoteDescription(description)
         .catch((error) => {
           this.logger.warn(`Error handling answer from ${from}:`, error);
           if (this.peers.get(from) === entry) {
@@ -664,6 +671,9 @@ export class SimplePeerManager {
 
     dataChannel.onclose = () => {
       this.logger.debug(`Data channel closed for peer ${peerId}`);
+      if (this.dataChannels.get(peerId) === dataChannel) {
+        this.cleanupPeerConnection(peerId, { retry: true });
+      }
     };
   }
 
@@ -749,19 +759,6 @@ export class SimplePeerManager {
     }
   }
 
-  private cleanupAwarenessStates(): void {
-    const awarenessStates = this.awareness.getStates();
-    if (awarenessStates.size <= MAX_AWARENESS_STATES) return;
-
-    this.logger.warn("Too many awareness states, cleaning up old ones");
-    const clientsToRemove: number[] = [];
-    awarenessStates.forEach((_state: unknown, clientId: number) => {
-      if (clientId !== this.ydoc.clientID) clientsToRemove.push(clientId);
-    });
-    if (clientsToRemove.length > 0) {
-      removeAwarenessStates(this.awareness, clientsToRemove, null);
-    }
-  }
 }
 
 // ICE gathering can take tens of seconds to complete when a STUN server is
