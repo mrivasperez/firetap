@@ -44,7 +44,7 @@ export type DocumentSnapshot = {
 
 export async function loadDocumentFromFirebase(rtdb: Database, docId: string, databasePaths?: DatabasePathsConfig, logger: Logger = defaultLogger): Promise<Uint8Array | null> {
   try {
-    const paths = buildDatabasePaths(databasePaths || { structure: 'flat', flat: { documents: '/documents', rooms: '/rooms', snapshots: '/snapshots', signaling: '/signaling' } }, docId)
+    const paths = buildDatabasePaths(databasePaths, docId)
     
     // Try to load the latest snapshot first
     const snapshotRef = ref(rtdb, `${paths.snapshots}/latest`)
@@ -147,7 +147,7 @@ export function startPeriodicPersistence(rtdb: Database, ydoc: Y.Doc, docId: str
 
 export async function persistDocument(rtdb: Database, ydoc: Y.Doc, docId: string, version?: number, databasePaths?: DatabasePathsConfig, logger: Logger = defaultLogger): Promise<void> {
   try {
-    const paths = buildDatabasePaths(databasePaths || { structure: 'flat', flat: { documents: '/documents', rooms: '/rooms', snapshots: '/snapshots', signaling: '/signaling' } }, docId)
+    const paths = buildDatabasePaths(databasePaths, docId)
     
     const update = Y.encodeStateAsUpdate(ydoc)
     const stateVector = Y.encodeStateVector(ydoc)
@@ -301,7 +301,7 @@ export function startSmartPersistence(
 
 export async function createDocumentSnapshot(rtdb: Database, ydoc: Y.Doc, docId: string, label?: string, databasePaths?: DatabasePathsConfig, logger: Logger = defaultLogger): Promise<void> {
   try {
-    const paths = buildDatabasePaths(databasePaths || { structure: 'flat', flat: { documents: '/documents', rooms: '/rooms', snapshots: '/snapshots', signaling: '/signaling' } }, docId)
+    const paths = buildDatabasePaths(databasePaths, docId)
     
     const update = Y.encodeStateAsUpdate(ydoc)
     const stateVector = Y.encodeStateVector(ydoc)
@@ -329,7 +329,7 @@ export async function createDocumentSnapshot(rtdb: Database, ydoc: Y.Doc, docId:
 
 export async function loadDocumentSnapshot(rtdb: Database, docId: string, snapshotKey: string, databasePaths?: DatabasePathsConfig, logger: Logger = defaultLogger): Promise<Uint8Array | null> {
   try {
-    const paths = buildDatabasePaths(databasePaths || { structure: 'flat', flat: { documents: '/documents', rooms: '/rooms', snapshots: '/snapshots', signaling: '/signaling' } }, docId)
+    const paths = buildDatabasePaths(databasePaths, docId)
     
     const snapshotRef = ref(rtdb, `${paths.snapshots}/${snapshotKey}`)
     const snap = await get(snapshotRef)
@@ -346,7 +346,7 @@ export async function loadDocumentSnapshot(rtdb: Database, docId: string, snapsh
 
 export async function getDocumentVersion(rtdb: Database, docId: string, databasePaths?: DatabasePathsConfig, logger: Logger = defaultLogger): Promise<number | null> {
   try {
-    const paths = buildDatabasePaths(databasePaths || { structure: 'flat', flat: { documents: '/documents', rooms: '/rooms', snapshots: '/snapshots', signaling: '/signaling' } }, docId)
+    const paths = buildDatabasePaths(databasePaths, docId)
     
     const snapshotRef = ref(rtdb, `${paths.snapshots}/latest`)
     const snap = await get(snapshotRef)

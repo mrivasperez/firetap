@@ -29,6 +29,7 @@ import {
   AWARENESS_THROTTLE_MS,
 } from "./utils/constants";
 import { resolveLogger } from "./utils/logger";
+import { validateDocId } from "./utils/config";
 
 export async function createFirebaseYWebrtcAdapter(
   opts: AdapterOptions
@@ -44,6 +45,7 @@ export async function createFirebaseYWebrtcAdapter(
     logger: loggerOption,
   } = opts;
   const logger = resolveLogger(loggerOption);
+  validateDocId(docId);
 
   // 1) Create the Y.Doc and Awareness with memory optimizations
   const ydoc = new Y.Doc();
@@ -89,15 +91,7 @@ export async function createFirebaseYWebrtcAdapter(
     ydoc,
     awareness,
     firebaseDatabase,
-    databasePaths || {
-      structure: "flat",
-      flat: {
-        documents: "/documents",
-        rooms: "/rooms",
-        snapshots: "/snapshots",
-        signaling: "/signaling",
-      },
-    },
+    databasePaths,
     maxDirectPeers,
     logger
   );

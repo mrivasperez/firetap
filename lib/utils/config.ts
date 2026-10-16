@@ -6,10 +6,9 @@ const MAX_DIRECT_PEERS_LIMIT = 20; // Maximum number of direct peer connections 
 const MIN_SYNC_INTERVAL_MS = 1_000; // Minimum sync interval (1 second)
 
 export type DatabasePathsConfig = {
-  // Base path structure - can be 'flat' or 'nested'
   structure: "flat" | "nested";
 
-  // For 'flat' structure: separate top-level paths
+  // Separate roots keyed by docId, e.g. rooms: '/rooms' -> '/rooms/{docId}'.
   flat?: {
     documents: string;
     rooms: string;
@@ -176,26 +175,45 @@ export function validateConfig(config: Partial<CollaborationConfig>): string[] {
 
 export type ConnectionState = "disconnected" | "connecting" | "connected";
 
-export function buildDatabasePaths(config: DatabasePathsConfig, docId: string) {
-  if (config.structure === "flat") {
-    if (!config.flat) throw new Error("Flat structure requires flat config");
+// Characters Firebase rejects in keys, plus "/" which would escape the document.
+const INVALID_DOC_ID = /[.#$\[\]/]/;
+
+export function validateDocId(docId: string): void {
+  if (typeof docId !== "string" || docId.trim().length === 0) {
+    throw new Error("docId must be a non-empty string");
+  }
+  if (INVALID_DOC_ID.test(docId)) {
+    throw new Error(
+      `docId "${docId}" contains a character Firebase does not allow in keys (. # $ [ ] /)`
+    );
+  }
+}
+
+export function buildDatabasePaths(
+  config: DatabasePathsConfig | undefined,
+  docId: string
+) {
+  validateDocId(docId);
+  const resolved = config ?? DEFAULT_DATABASE_PATHS;
+  if (resolved.structure === "flat") {
+    if (!resolved.flat) throw new Error("Flat structure requires flat config");
     return {
-      documents: config.flat.documents,
-      rooms: config.flat.rooms,
-      snapshots: config.flat.snapshots,
-      signaling: config.flat.signaling,
+      documents: `${resolved.flat.documents}/${docId}`,
+      rooms: `${resolved.flat.rooms}/${docId}`,
+      snapshots: `${resolved.flat.snapshots}/${docId}`,
+      signaling: `${resolved.flat.signaling}/${docId}`,
     };
-  } else if (config.structure === "nested") {
-    if (!config.nested)
+  } else if (resolved.structure === "nested") {
+    if (!resolved.nested)
       throw new Error("Nested structure requires nested config");
-    const base = `${config.nested.basePath}/${docId}`;
+    const base = `${resolved.nested.basePath}/${docId}`;
     return {
-      documents: `${base}/${config.nested.subPaths.documents}`,
-      rooms: `${base}/${config.nested.subPaths.rooms}`,
-      snapshots: `${base}/${config.nested.subPaths.snapshots}`,
-      signaling: `${base}/${config.nested.subPaths.signaling}`,
+      documents: `${base}/${resolved.nested.subPaths.documents}`,
+      rooms: `${base}/${resolved.nested.subPaths.rooms}`,
+      snapshots: `${base}/${resolved.nested.subPaths.snapshots}`,
+      signaling: `${base}/${resolved.nested.subPaths.signaling}`,
     };
   } else {
-    throw new Error(`Unknown database structure: ${config.structure}`);
+    throw new Error(`Unknown database structure: ${resolved.structure}`);
   }
 }

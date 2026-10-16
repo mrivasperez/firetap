@@ -40,7 +40,7 @@ export class SimplePeerManager {
   private peerId: string;
   private ydoc: Y.Doc;
   private awareness: Awareness;
-  private databasePaths: DatabasePathsConfig;
+  private databasePaths: DatabasePathsConfig | undefined;
   private rtdb: Database;
   private eventListeners: Map<
     keyof AdapterEvents,
@@ -143,7 +143,7 @@ export class SimplePeerManager {
     ydoc: Y.Doc,
     awareness: Awareness,
     rtdb: Database,
-    databasePaths: DatabasePathsConfig,
+    databasePaths: DatabasePathsConfig | undefined,
     maxDirectPeers: number = 20,
     logger: Logger = defaultLogger
   ) {

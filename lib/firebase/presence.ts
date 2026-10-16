@@ -29,18 +29,7 @@ export async function announcePresence(
   logger: Logger = defaultLogger
 ): Promise<void> {
   try {
-    const paths = buildDatabasePaths(
-      databasePaths || {
-        structure: "flat",
-        flat: {
-          documents: "/documents",
-          rooms: "/rooms",
-          snapshots: "/snapshots",
-          signaling: "/signaling",
-        },
-      },
-      docId
-    );
+    const paths = buildDatabasePaths(databasePaths, docId);
     const peerRef = ref(rtdb, `${paths.rooms}/peers/${peer.id}`);
 
     // Set up automatic cleanup on disconnect (cost optimization)
@@ -67,18 +56,7 @@ export async function stopAnnouncingPresence(
   logger: Logger = defaultLogger
 ): Promise<void> {
   try {
-    const paths = buildDatabasePaths(
-      databasePaths || {
-        structure: "flat",
-        flat: {
-          documents: "/documents",
-          rooms: "/rooms",
-          snapshots: "/snapshots",
-          signaling: "/signaling",
-        },
-      },
-      docId
-    );
+    const paths = buildDatabasePaths(databasePaths, docId);
     const peerRef = ref(rtdb, `${paths.rooms}/peers/${peerId}`);
     await remove(peerRef);
   } catch (error) {
@@ -94,18 +72,7 @@ export async function cleanupStalePeers(
   logger: Logger = defaultLogger
 ): Promise<void> {
   try {
-    const paths = buildDatabasePaths(
-      databasePaths || {
-        structure: "flat",
-        flat: {
-          documents: "/documents",
-          rooms: "/rooms",
-          snapshots: "/snapshots",
-          signaling: "/signaling",
-        },
-      },
-      docId
-    );
+    const paths = buildDatabasePaths(databasePaths, docId);
     const peersRef = ref(rtdb, `${paths.rooms}/peers`);
 
     // Fetch peers with lastSeen older than the stale threshold
