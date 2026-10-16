@@ -24,7 +24,8 @@
     "test": "vitest run --project unit",
     "test:watch": "vitest --project unit",
     "test:emulator:run": "vitest run --project emulator",
-    "prepublishOnly": "npm run build"
+    "prepublishOnly": "npm run build",
+    "bench:cost": "node bench/run.mjs"
   },
   "keywords": [
     "collaborative-editing",
@@ -55,6 +56,8 @@
   },
   "devDependencies": {
     "@types/node": "^24.7.2",
+    "esbuild": "^0.25.10",
+    "playwright": "^1.56.1",
     "tsup": "^8.0.0",
     "typescript": "^5.9.3",
     "vitest": "^5.0.5"
