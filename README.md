@@ -66,10 +66,9 @@ firetap/
 The core NPM package that provides the Firebase + WebRTC adapter for Yjs collaboration.
 
 **Key Features:**
-- WebRTC mesh networking for peer-to-peer sync
-- Firebase Realtime Database for persistence
-- Native gzip compression (no dependencies)
-- 99%+ reduction in Firebase bandwidth costs
+- Live edits sync peer to peer over WebRTC
+- Documents are stored in Firebase Realtime Database as a compressed snapshot plus recent edits
+- New collaborators load from peers who have the document open; browsers cache it between visits
 - Built for TipTap and Yjs
 
 [Read the full documentation →](./lib/README.md)
@@ -106,6 +105,11 @@ Firebase Cloud Functions for server-side operations (lots of awesome things one 
 | `npm run dev:client` | Start Vite dev server for client app |
 | `npm run build:lib` | Build the Firetap library |
 | `npm run build:all` | Build both library and client |
+| `npm run typecheck` | Typecheck the library and its tests |
+| `npm test` | Run the library's unit tests |
+| `npm run test:emulator` | Run the library's tests against the Realtime Database emulator (needs Java) |
+| `npm run check:readme -w lib` | Typecheck the code examples in the library README |
+| `npm run bench:cost -w lib` | Measure what Firebase sends to clients in real browser tabs (see `lib/bench/run.mjs`) |
 
 ## Firebase Emulators
 
@@ -177,7 +181,7 @@ The included security rules allow read/write access in emulator mode for easy te
 ┌─────────────────────────────────────────────────────────────┐
 │          Firebase Realtime Database (Emulator)               │
 │  ┌─────────────────────────────────────────────────┐       │
-│  │  • Document snapshots (compressed)              │       │
+│  │  • Document snapshot (compressed) + edit log    │       │
 │  │  • WebRTC signaling                             │       │
 │  │  • Peer presence                                │       │
 │  └─────────────────────────────────────────────────┘       │
@@ -185,24 +189,14 @@ The included security rules allow read/write access in emulator mode for easy te
 ```
 
 **How it works:**
-1. Clients load initial document state from Firebase
-2. WebRTC connections established between peers
-3. Real-time edits sync via WebRTC mesh (bypassing Firebase)
-4. Periodic snapshots saved to Firebase for persistence
-5. New clients load latest snapshot and join the mesh
+1. A client opening a document gets the snapshot from a peer who has it open, from its browser cache, or from Firebase, plus the recent edits from Firebase
+2. Clients find each other through presence in Firebase and connect over WebRTC
+3. Live edits sync between peers; each client also appends its own edits to the log in Firebase
+4. The log is regularly merged into a new compressed snapshot
 
-## Performance & Cost Optimization
+## Firebase Cost
 
-Firetap is designed to minimize Firebase Realtime Database costs:
-
-- **WebRTC mesh networking**: Active collaboration happens peer-to-peer
-- **Native compression**: Gzip compression reduces payload sizes by 60-80%
-- **Smart persistence**: Only periodic snapshots, not every keystroke
-- **Efficient signaling**: Minimal Firebase usage for WebRTC handshake
-
-**Real-world savings**: ~99.8% reduction in Firebase bandwidth costs compared to Firebase-only sync.
-
-[Read more about performance optimization →](./lib/README.md#-firebase-cost-optimization-)
+Firebase bills by data downloaded and stored. Live editing doesn't go through Firebase, and loading is designed to download as little as possible. The library README has [measurements and details](./lib/README.md#firebase-cost).
 
 ## Testing Collaboration
 

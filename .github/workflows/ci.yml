@@ -31,6 +31,9 @@ jobs:
       - name: Build library
         run: npm run build:lib
 
+      - name: README examples typecheck
+        run: npm run check:readme -w lib
+
       - name: Unit tests
         run: npm test
 

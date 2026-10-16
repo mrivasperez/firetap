@@ -25,7 +25,8 @@
     "test:watch": "vitest --project unit",
     "test:emulator:run": "vitest run --project emulator",
     "prepublishOnly": "npm run build",
-    "bench:cost": "node bench/run.mjs"
+    "bench:cost": "node bench/run.mjs",
+    "check:readme": "node scripts/check-readme.mjs"
   },
   "keywords": [
     "collaborative-editing",
