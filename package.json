@@ -4,8 +4,7 @@
   "private": true,
   "workspaces": [
     "lib",
-    "client",
-    "functions"
+    "client"
   ],
   "scripts": {
     "emulators": "firebase emulators:start",

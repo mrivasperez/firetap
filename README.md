@@ -2,7 +2,7 @@
 
 **Real-time collaborative editing with TipTap, Yjs, Firebase, and WebRTC**
 
-This is a monorepo workspace containing the Firetap library, a demo client application, and Firebase Cloud Functions. The workspace is pre-configured with Firebase Emulators for local development and testing.
+This is a monorepo workspace containing the Firetap library and a demo client application. The workspace is pre-configured with Firebase Emulators for local development and testing.
 
 ## Project Structure
 
@@ -10,7 +10,6 @@ This is a monorepo workspace containing the Firetap library, a demo client appli
 firetap/
 ├── lib/              # Firetap NPM package (the core library)
 ├── client/           # Demo React app with TipTap collaborative editor
-├── functions/        # Firebase Cloud Functions
 ├── firebase.json     # Firebase configuration
 ├── .firebaserc       # Firebase project settings (demo-firetap)
 └── package.json      # Workspace root package
@@ -46,7 +45,6 @@ firetap/
    - **Realtime Database**: `localhost:9000`
    - **Authentication**: `localhost:9099`
    - **Firestore**: `localhost:8080`
-   - **Functions**: `localhost:5001`
    - **Hosting**: `localhost:5000`
    - **Emulator UI**: `http://localhost:4000`
 
@@ -93,10 +91,6 @@ A React + Vite application demonstrating Firetap with TipTap collaborative edito
 npm run dev:client
 ```
 
-### `functions/` - Cloud Functions
-
-Firebase Cloud Functions for server-side operations (lots of awesome things one can do with that).
-
 ## Development Scripts
 
 | Command | Description |
@@ -123,7 +117,6 @@ The workspace uses the `demo-firetap` project (configured in `.firebaserc`) whic
 ```json
 {
   "auth": 9099,
-  "functions": 5001,
   "firestore": 8080,
   "database": 9000,
   "hosting": 5000,
@@ -142,7 +135,6 @@ npm run emulators
 Open `http://localhost:4000` to access the Firebase Emulator UI where you can:
 - View and edit Realtime Database data
 - Inspect Authentication users
-- Monitor Functions logs
 - Clear all emulator data
 
 **Client connects automatically:**
