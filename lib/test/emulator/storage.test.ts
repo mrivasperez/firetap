@@ -1,10 +1,8 @@
 import { goOffline, goOnline, type Database } from 'firebase/database'
-import * as Y from 'yjs'
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createFirebaseYWebrtcAdapter } from '../../adapter'
 import type { AdapterHandle, AdapterOptions } from '../../core/types'
 import { LoadError, type SaveState } from '../../firebase/document-store'
-import { base64ToUint8Array } from '../../utils/base64'
 import { FakeRTCPeerConnection, installFakeWebRTC, resetFakeWebRTC } from '../support/fake-webrtc'
 import {
   closeClients,
@@ -12,6 +10,7 @@ import {
   nestedPaths,
   readRaw,
   setRules,
+  storedDoc,
   sleep,
   uniqueBasePath,
   waitFor,
@@ -41,10 +40,7 @@ const text = (adapter: AdapterHandle) => adapter.ydoc.getText('t').toString()
 type RawLog = Record<string, { data: string; by: string }> | null
 
 async function storedText(basePath: string): Promise<string> {
-  const log = (await readRaw(`${basePath}/doc/updates`)) as RawLog
-  const doc = new Y.Doc()
-  for (const entry of Object.values(log ?? {})) Y.applyUpdate(doc, base64ToUint8Array(entry.data))
-  return doc.getText('t').toString()
+  return (await storedDoc(`${basePath}/doc`)).getText('t').toString()
 }
 
 const OPEN_RULES = { rules: { '.read': true, '.write': true } }

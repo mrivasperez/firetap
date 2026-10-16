@@ -85,3 +85,22 @@ export async function writeRaw(path: string, value: unknown): Promise<void> {
   })
   if (!res.ok) throw new Error(`Failed to write ${path}: ${res.status}`)
 }
+
+export async function storedDoc(docRoot: string): Promise<import('yjs').Doc> {
+  const Y = await import('yjs')
+  const { base64ToUint8Array } = await import('../../utils/base64')
+  const { decompressBytes } = await import('../../utils/compression')
+  const doc = new Y.Doc()
+  const meta = (await readRaw(`${docRoot}/meta`)) as { snapshot?: string } | null
+  if (meta?.snapshot) {
+    const parts = (await readRaw(`${docRoot}/snapshots/${meta.snapshot}`)) as string[]
+    Y.applyUpdate(doc, await decompressBytes(base64ToUint8Array(parts.join(''))))
+  }
+  const log = (await readRaw(`${docRoot}/updates`)) as Record<string, { data?: string; gz?: 1; p?: string[] }> | null
+  for (const entry of Object.values(log ?? {})) {
+    const data = entry.data ?? (entry.p ?? []).join('')
+    const bytes = base64ToUint8Array(data)
+    Y.applyUpdate(doc, entry.gz ? await decompressBytes(bytes) : bytes)
+  }
+  return doc
+}

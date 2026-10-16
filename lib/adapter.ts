@@ -64,7 +64,7 @@ export async function createFirebaseYWebrtcAdapter(
 
   const documentStore = new DocumentStore({
     rtdb: firebaseDatabase,
-    updatesPath: paths.updates,
+    paths,
     ydoc,
     peerId,
     debounceMs: persistDebounceMs,
@@ -73,6 +73,8 @@ export async function createFirebaseYWebrtcAdapter(
     onStateChange: (state) => peerManager.emit("save-state-changed", { state }),
     onError: (error) => peerManager.emit("persist-error", { error }),
     onPersisted: (clientId, clock) => peerManager.broadcastPersisted(clientId, clock),
+    onMerged: (generation) =>
+      peerManager.emit("document-persisted", { docId, version: generation }),
   });
   try {
     await documentStore.load();
@@ -83,6 +85,11 @@ export async function createFirebaseYWebrtcAdapter(
   }
   store.current = documentStore;
   documentStore.start();
+
+  // The log is already in memory, so merging now costs no extra download.
+  if (documentStore.shouldMerge()) {
+    documentStore.merge().catch((error) => logger.warn("Failed to merge the log:", error));
+  }
 
   let updateBatchTimer: ReturnType<typeof setTimeout> | null = null;
   let pendingUpdates: Uint8Array[] = [];

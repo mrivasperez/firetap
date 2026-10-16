@@ -15,3 +15,14 @@ export async function decompressText(encoded: string): Promise<string> {
   const stream = new Blob([bytes as BlobPart]).stream().pipeThrough(new DecompressionStream("gzip"));
   return new Response(stream).text();
 }
+
+export async function compressBytes(bytes: Uint8Array): Promise<Uint8Array | null> {
+  if (!USE_NATIVE_COMPRESSION) return null;
+  const stream = new Blob([bytes as BlobPart]).stream().pipeThrough(new CompressionStream("gzip"));
+  return new Uint8Array(await new Response(stream).arrayBuffer());
+}
+
+export async function decompressBytes(bytes: Uint8Array): Promise<Uint8Array> {
+  const stream = new Blob([bytes as BlobPart]).stream().pipeThrough(new DecompressionStream("gzip"));
+  return new Uint8Array(await new Response(stream).arrayBuffer());
+}

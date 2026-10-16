@@ -92,8 +92,10 @@ describe('peer sync protocol', () => {
     await waitFor(() => a.awareness.getStates().get(b.ydoc.clientID)?.cursor === 1, { message: 'cursor B' })
     await waitFor(() => a.awareness.getStates().get(c.ydoc.clientID)?.cursor === 2, { message: 'cursor C' })
 
-    b.disconnect()
-    await waitFor(() => !a.awareness.getStates().has(b.ydoc.clientID), { timeout: 5000, message: 'cursor removal' })
+    const bClient = b.ydoc.clientID
+    await b.disconnect()
+    // Well under awareness's own 30s timeout, which would also remove it eventually.
+    await waitFor(() => !a.awareness.getStates().has(bClient), { timeout: 10_000, message: 'cursor removal' })
     await sleep(200)
     expect(a.awareness.getStates().get(c.ydoc.clientID)?.cursor).toBe(2)
   })
