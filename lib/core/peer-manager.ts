@@ -29,6 +29,7 @@ import {
   MSG_UPDATE,
   MSG_NEIGHBORS,
   MSG_PERSISTED,
+  MSG_STATUS,
   PROTOCOL_VERSION,
 } from "./peer-session";
 import {
@@ -42,6 +43,7 @@ import {
   ICE_SETTLE_MS,
   ANTI_ENTROPY_INTERVAL_MS,
   ISOLATION_DELAY_MS,
+  PRESENCE_SETTLE_MS,
   DEFAULT_MAX_DIRECT_PEERS,
   TOPOLOGY_SETTLE_MS,
 } from "../utils/constants";
@@ -113,6 +115,12 @@ export class SimplePeerManager {
   private reconcileTimer: Timer | null = null;
   private isolated = false;
   private isolationTimer: Timer | null = null;
+
+  // The snapshot generation our document contains, and what each peer reports.
+  private knownGeneration = 0;
+  private peerGenerations = new Map<string, number>();
+  private initiallySynced = new Set<string>();
+  private syncWaiters = new Set<() => void>();
   private desiredCache: Set<string> | null = null;
 
   private presentPeers = new Map<string, PresenceEntry>();
@@ -605,6 +613,8 @@ export class SimplePeerManager {
     }
 
     this.removePeerAwareness(otherPeerId);
+    this.peerGenerations.delete(otherPeerId);
+    this.initiallySynced.delete(otherPeerId);
     this.neighborsOf.delete(otherPeerId);
     if (current && this.running) this.announceNeighbors();
     this.updateIsolation();
@@ -732,6 +742,7 @@ export class SimplePeerManager {
       if (clients.length > 0) {
         session.send(MSG_AWARENESS, encodeAwarenessUpdate(this.awareness, clients));
       }
+      session.send(MSG_STATUS, this.statusPayload());
       session.flush();
       this.announceNeighbors();
       this.updateIsolation();
@@ -768,9 +779,23 @@ export class SimplePeerManager {
         break;
       }
       case MSG_SYNC_STEP2:
+        Y.applyUpdate(this.ydoc, payload, this.originFor(peerId));
+        if (!this.initiallySynced.has(peerId)) {
+          this.initiallySynced.add(peerId);
+          this.emit("sync-completed", { docId: this.docId, peerId, updateSize: payload.length });
+          this.syncWaiters.forEach((check) => check());
+        }
+        break;
       case MSG_UPDATE:
         Y.applyUpdate(this.ydoc, payload, this.originFor(peerId));
         break;
+      case MSG_STATUS: {
+        const status = JSON.parse(new TextDecoder().decode(payload));
+        if (!Number.isInteger(status?.generation)) throw new Error("invalid status");
+        this.peerGenerations.set(peerId, status.generation);
+        this.syncWaiters.forEach((check) => check());
+        break;
+      }
       case MSG_AWARENESS:
         applyAwarenessUpdate(this.awareness, payload, this.originFor(peerId));
         break;
@@ -856,6 +881,43 @@ export class SimplePeerManager {
       JSON.stringify({ peer, client: clientId, clock })
     );
     for (const [, session] of this.openSessions()) session.send(MSG_PERSISTED, payload);
+  }
+
+  setKnownGeneration(generation: number): void {
+    if (generation === this.knownGeneration) return;
+    this.knownGeneration = generation;
+    const payload = this.statusPayload();
+    for (const [, session] of this.openSessions()) session.send(MSG_STATUS, payload);
+  }
+
+  private statusPayload(): Uint8Array {
+    return new TextEncoder().encode(JSON.stringify({ generation: this.knownGeneration }));
+  }
+
+  /**
+   * Resolves true once a peer whose document contains snapshot `generation` has
+   * finished its initial sync with us, or false if none does in time.
+   */
+  waitForPeerSync(generation: number, timeoutMs: number): Promise<boolean> {
+    return new Promise((resolve) => {
+      const finish = (synced: boolean) => {
+        this.syncWaiters.delete(check);
+        clearTimeout(timeout);
+        clearTimeout(noPeers);
+        resolve(synced);
+      };
+      const check = () => {
+        for (const peerId of this.initiallySynced) {
+          if ((this.peerGenerations.get(peerId) ?? -1) >= generation) return finish(true);
+        }
+      };
+      const timeout = setTimeout(() => finish(false), timeoutMs);
+      const noPeers = setTimeout(() => {
+        if (this.presentPeers.size === 0) finish(false);
+      }, PRESENCE_SETTLE_MS);
+      this.syncWaiters.add(check);
+      check();
+    });
   }
 
   private updateIsolation(): void {

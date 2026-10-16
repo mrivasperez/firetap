@@ -84,6 +84,7 @@ export type DocumentStoreOptions = {
   onError?: (error: Error) => void;
   onPersisted?: (clientId: number, clock: number) => void;
   onMerged?: (generation: number) => void;
+  onGenerationChange?: (generation: number) => void;
 };
 
 // Merges use only what was read from Firebase, never the live document.
@@ -139,10 +140,19 @@ export class DocumentStore {
     return this.queue.length > 0 || this.inFlight !== null;
   }
 
-  async load(): Promise<void> {
+  async fetchMeta(): Promise<DocumentMeta> {
+    try {
+      return readMeta(await get(ref(this.opts.rtdb, this.opts.paths.meta)));
+    } catch (error) {
+      throw new LoadError("Failed to read the document from Firebase", { cause: error });
+    }
+  }
+
+  /** Pass the snapshot generation peers have already synced to us to skip downloading it. */
+  async load({ haveGeneration }: { haveGeneration?: number } = {}): Promise<void> {
     let base: Base | null = null;
     for (let attempt = 1; !base; attempt++) {
-      base = await this.readBase();
+      base = await this.readBase(attempt === 1 ? haveGeneration : undefined);
       if (!base && attempt >= LOAD_MAX_ATTEMPTS) {
         throw new LoadError("The document kept changing while loading; try again");
       }
@@ -150,35 +160,32 @@ export class DocumentStore {
 
     const updates = [...(base.snapshot ? [base.snapshot] : []), ...base.entries.values()];
     if (updates.length > 0) {
+      let stored: Uint8Array;
       try {
-        Y.applyUpdate(this.opts.ydoc, Y.mergeUpdates(updates), FIREBASE_ORIGIN);
+        stored = Y.mergeUpdates(updates);
+        Y.applyUpdate(this.opts.ydoc, stored, FIREBASE_ORIGIN);
       } catch (error) {
         throw new LoadError("The stored document could not be decoded", { cause: error });
       }
+      // Only what was read from Firebase counts as saved, not what peers sent.
+      Y.decodeStateVector(Y.encodeStateVectorFromUpdate(stored)).forEach((clock, client) =>
+        this.notePersisted(client, clock)
+      );
     }
-    this.base = base;
+    this.setBase(base);
     base.entries.forEach((_bytes, key) => this.rememberKey(key));
-
-    // Everything just loaded is saved.
-    Y.decodeStateVector(Y.encodeStateVector(this.opts.ydoc)).forEach((clock, client) =>
-      this.notePersisted(client, clock)
-    );
   }
 
   // Null if a merge landed mid-read: the snapshot may not cover entries it deleted.
-  private async readBase(): Promise<Base | null> {
+  private async readBase(haveGeneration?: number): Promise<Base | null> {
     const { rtdb, paths } = this.opts;
     try {
       const meta = readMeta(await get(ref(rtdb, paths.meta)));
       let snapshot: Uint8Array | null = null;
-      let snapshotStoredBytes = 0;
-      if (meta.snapshot) {
-        const stored = await get(ref(rtdb, `${paths.snapshots}/${meta.snapshot}`));
-        const parts = stored.exists() ? partsOf(stored.val()) : null;
-        if (!parts || parts.length !== meta.parts) return null;
-        const joined = parts.join("");
-        snapshotStoredBytes = joined.length;
-        snapshot = await decompressBytes(base64ToUint8Array(joined));
+      let snapshotStoredBytes = meta.bytes;
+      if (meta.snapshot && meta.generation !== haveGeneration) {
+        snapshot = await this.downloadSnapshot(meta);
+        if (!snapshot) return null;
       }
 
       const log = await get(ref(rtdb, paths.updates));
@@ -236,10 +243,25 @@ export class DocumentStore {
     return this.merging;
   }
 
+  /** Null if that snapshot is gone, i.e. a merge replaced it. */
+  private async downloadSnapshot(meta: DocumentMeta): Promise<Uint8Array | null> {
+    const stored = await get(ref(this.opts.rtdb, `${this.opts.paths.snapshots}/${meta.snapshot}`));
+    const parts = stored.exists() ? partsOf(stored.val()) : null;
+    if (!parts || parts.length !== meta.parts) return null;
+    return decompressBytes(base64ToUint8Array(parts.join("")));
+  }
+
   private async doMerge(): Promise<boolean> {
     const base = this.base;
     if (!base || base.entries.size === 0) return false;
     const { rtdb, paths, peerId, logger } = this.opts;
+    if (base.snapshotKey && !base.snapshot) {
+      // Peers gave us this snapshot's content, but a merge must start from stored bytes.
+      const meta = await this.fetchMeta();
+      if (meta.generation !== base.generation) return false;
+      base.snapshot = await this.downloadSnapshot(meta);
+      if (!base.snapshot) return false;
+    }
     const metaRef = ref(rtdb, paths.meta);
     const now = () => Date.now() + this.serverOffset;
     await this.refreshServerOffset();
@@ -318,14 +340,14 @@ export class DocumentStore {
       );
     }
 
-    this.base = {
+    this.setBase({
       generation: newGeneration,
       snapshotKey,
       snapshot,
       snapshotStoredBytes: encoded.length,
       entries: new Map(),
       entryStoredBytes: 0,
-    };
+    });
     logger.debug(
       `Merged ${base.entries.size} log entries into snapshot generation ${newGeneration}`
     );
@@ -386,7 +408,7 @@ export class DocumentStore {
       if (base) {
         const updates = [...(base.snapshot ? [base.snapshot] : []), ...base.entries.values()];
         Y.applyUpdate(this.opts.ydoc, Y.mergeUpdates(updates), FIREBASE_ORIGIN);
-        this.base = base;
+        this.setBase(base);
         base.entries.forEach((_bytes, key) => this.rememberKey(key));
       }
     }
@@ -428,6 +450,12 @@ export class DocumentStore {
       this.base.entries.set(key, update);
       this.base.entryStoredBytes += data.length;
     }
+  }
+
+  private setBase(base: Base): void {
+    const changed = base.generation !== this.base?.generation;
+    this.base = base;
+    if (changed) this.opts.onGenerationChange?.(base.generation);
   }
 
   private rememberKey(key: string): void {

@@ -13,6 +13,7 @@ import {
   DEFAULT_MAX_DIRECT_PEERS,
   DISCONNECT_FLUSH_TIMEOUT_MS,
   PEER_ID_DISPLAY_LENGTH,
+  PEER_LOAD_TIMEOUT_MS,
   AWARENESS_THROTTLE_MS,
 } from "./utils/constants";
 import { resolveLogger } from "./utils/logger";
@@ -86,10 +87,28 @@ export async function createFirebaseYWebrtcAdapter(
     onPersisted: (clientId, clock) => peerManager.broadcastPersisted(clientId, clock),
     onMerged: (generation) =>
       peerManager.emit("document-persisted", { docId, version: generation }),
+    onGenerationChange: (generation) => peerManager.setKnownGeneration(generation),
   });
+
+  awareness.setLocalStateField("user", { name: peerInfo.name, id: peerId });
+  // Apps (and TipTap's caret extension) replace the user field, so keep the peer id apart.
+  awareness.setLocalStateField("firetap", { peerId });
+
   try {
-    await documentStore.load();
+    // Someone with the document open can send us the snapshot over WebRTC,
+    // so we only download the log.
+    const meta = await documentStore.fetchMeta();
+    let haveGeneration: number | undefined;
+    if (meta.snapshot) {
+      await peerManager.start();
+      if (await peerManager.waitForPeerSync(meta.generation, PEER_LOAD_TIMEOUT_MS)) {
+        haveGeneration = meta.generation;
+        logger.debug("Got the snapshot from a peer; loading only the edit log");
+      }
+    }
+    await documentStore.load({ haveGeneration });
   } catch (error) {
+    peerManager.destroy();
     awareness.destroy();
     ydoc.destroy();
     throw error;
@@ -156,13 +175,6 @@ export async function createFirebaseYWebrtcAdapter(
       }, AWARENESS_THROTTLE_MS);
     }
   );
-
-  awareness.setLocalStateField("user", {
-    name: peerInfo.name,
-    id: peerId,
-  });
-  // Apps (and TipTap's caret extension) replace the user field, so keep the peer id apart.
-  awareness.setLocalStateField("firetap", { peerId });
 
   await peerManager.start();
 

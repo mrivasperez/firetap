@@ -29,7 +29,8 @@ export type AdapterEvents = {
   // Retried automatically; saveState stays "error" until a write succeeds.
   "persist-error": { error: Error };
   error: { error: Error; context: string };
-  "sync-completed": { docId: string; updateSize: number };
+  // The first sync with a newly connected peer finished.
+  "sync-completed": { docId: string; peerId: string; updateSize: number };
 };
 
 export type AdapterHandle = {
