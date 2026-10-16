@@ -1,11 +1,13 @@
 import { COMPRESSION_THRESHOLD, USE_NATIVE_COMPRESSION } from "./constants";
+import { defaultLogger, type Logger } from "./logger";
 
 /**
  * Compress data using native browser CompressionStream API (gzip)
  * Falls back to uncompressed if API not available
  */
 export async function compressData(
-  data: Uint8Array
+  data: Uint8Array,
+  logger: Logger = defaultLogger
 ): Promise<{ compressed: Uint8Array; isCompressed: boolean }> {
   // Only compress if browser supports it and data is large enough
   if (!USE_NATIVE_COMPRESSION || data.length < COMPRESSION_THRESHOLD) {
@@ -29,7 +31,7 @@ export async function compressData(
     }
     return { compressed: data, isCompressed: false };
   } catch (error) {
-    console.warn("Compression failed, sending uncompressed:", error);
+    logger.warn("Compression failed, sending uncompressed:", error);
     return { compressed: data, isCompressed: false };
   }
 }
@@ -37,7 +39,10 @@ export async function compressData(
 /**
  * Decompress data using native browser DecompressionStream API (gzip)
  */
-export async function decompressData(data: Uint8Array): Promise<Uint8Array> {
+export async function decompressData(
+  data: Uint8Array,
+  logger: Logger = defaultLogger
+): Promise<Uint8Array> {
   if (!USE_NATIVE_COMPRESSION) {
     return data;
   }
@@ -54,7 +59,7 @@ export async function decompressData(data: Uint8Array): Promise<Uint8Array> {
     const decompressedBlob = await new Response(decompressedStream).blob();
     return new Uint8Array(await decompressedBlob.arrayBuffer());
   } catch (error) {
-    console.warn("Decompression failed, treating as uncompressed:", error);
+    logger.warn("Decompression failed, treating as uncompressed:", error);
     return data;
   }
 }

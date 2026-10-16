@@ -9,6 +9,7 @@ import {
   endAt,
 } from "firebase/database";
 import { buildDatabasePaths, type DatabasePathsConfig } from "../utils/config";
+import { defaultLogger, type Logger } from "../utils/logger";
 
 // Peer Presence Configuration
 const STALE_PEER_THRESHOLD_MS = 600_000; // 10 minutes - consider peer stale after this time (aligned with heartbeat optimization)
@@ -24,7 +25,8 @@ export async function announcePresence(
   rtdb: Database,
   docId: string,
   peer: PeerInfo,
-  databasePaths?: DatabasePathsConfig
+  databasePaths?: DatabasePathsConfig,
+  logger: Logger = defaultLogger
 ): Promise<void> {
   try {
     const paths = buildDatabasePaths(
@@ -52,7 +54,7 @@ export async function announcePresence(
     };
     await set(peerRef, peerWithTimestamp);
   } catch (error) {
-    console.error("Failed to announce presence:", error);
+    logger.error("Failed to announce presence:", error);
     throw error;
   }
 }
@@ -61,7 +63,8 @@ export async function stopAnnouncingPresence(
   rtdb: Database,
   docId: string,
   peerId: string,
-  databasePaths?: DatabasePathsConfig
+  databasePaths?: DatabasePathsConfig,
+  logger: Logger = defaultLogger
 ): Promise<void> {
   try {
     const paths = buildDatabasePaths(
@@ -79,7 +82,7 @@ export async function stopAnnouncingPresence(
     const peerRef = ref(rtdb, `${paths.rooms}/peers/${peerId}`);
     await remove(peerRef);
   } catch (error) {
-    console.warn("Failed to remove presence:", error);
+    logger.warn("Failed to remove presence:", error);
     // Don't throw here as it's cleanup
   }
 }
@@ -87,7 +90,8 @@ export async function stopAnnouncingPresence(
 export async function cleanupStalePeers(
   rtdb: Database,
   docId: string,
-  databasePaths?: DatabasePathsConfig
+  databasePaths?: DatabasePathsConfig,
+  logger: Logger = defaultLogger
 ): Promise<void> {
   try {
     const paths = buildDatabasePaths(
@@ -127,7 +131,7 @@ export async function cleanupStalePeers(
           ? (now - peer.lastSeen) / MILLISECONDS_TO_SECONDS
           : "unknown";
 
-        console.log(
+        logger.debug(
           `Removing stale peer: ${peerId} (last seen ${timeSinceLastSeen}s ago)`
         );
 
@@ -143,12 +147,12 @@ export async function cleanupStalePeers(
       await Promise.all(stalePromises);
 
       if (stalePromises.length > 0) {
-        console.log(
+        logger.debug(
           `Cleaned up ${stalePromises.length / 2} stale peer entries`
         );
       }
     }
   } catch (error) {
-    console.warn("Failed to cleanup stale peers:", error);
+    logger.warn("Failed to cleanup stale peers:", error);
   }
 }

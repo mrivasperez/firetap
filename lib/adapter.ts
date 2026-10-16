@@ -28,6 +28,7 @@ import {
   MEMORY_CHECK_INTERVAL_MS,
   AWARENESS_THROTTLE_MS,
 } from "./utils/constants";
+import { resolveLogger } from "./utils/logger";
 
 export async function createFirebaseYWebrtcAdapter(
   opts: AdapterOptions
@@ -40,7 +41,9 @@ export async function createFirebaseYWebrtcAdapter(
     syncIntervalMs = DEFAULT_SYNC_INTERVAL_MS,
     maxDirectPeers = DEFAULT_MAX_DIRECT_PEERS,
     databasePaths,
+    logger: loggerOption,
   } = opts;
+  const logger = resolveLogger(loggerOption);
 
   // 1) Create the Y.Doc and Awareness with memory optimizations
   const ydoc = new Y.Doc();
@@ -62,13 +65,14 @@ export async function createFirebaseYWebrtcAdapter(
     const loaded = await loadDocumentFromFirebase(
       firebaseDatabase,
       docId,
-      databasePaths
+      databasePaths,
+      logger
     );
     if (loaded) {
       Y.applyUpdate(ydoc, loaded);
     }
   } catch (e) {
-    console.warn("Failed to load persisted Y document from Firebase", e);
+    logger.warn("Failed to load persisted Y document from Firebase", e);
   }
 
   // 3) Create peer info for Firebase presence
@@ -94,7 +98,8 @@ export async function createFirebaseYWebrtcAdapter(
         signaling: "/signaling",
       },
     },
-    maxDirectPeers
+    maxDirectPeers,
+    logger
   );
 
   // 5) Set up Y.js event handlers with origin tracking and throttling
@@ -172,7 +177,7 @@ export async function createFirebaseYWebrtcAdapter(
           );
           // Fire and forget - compression happens asynchronously
           peerManager.broadcastAwareness(awarenessUpdate).catch((error) => {
-            console.warn("Failed to broadcast awareness:", error);
+            logger.warn("Failed to broadcast awareness:", error);
           });
           pendingAwarenessChanges.clear();
         }
@@ -190,11 +195,23 @@ export async function createFirebaseYWebrtcAdapter(
   // 7) Announce presence in Firebase
   let presenceCleanup: (() => void) | null = null;
   try {
-    await announcePresence(firebaseDatabase, docId, peerInfo, databasePaths);
+    await announcePresence(
+      firebaseDatabase,
+      docId,
+      peerInfo,
+      databasePaths,
+      logger
+    );
     presenceCleanup = () =>
-      stopAnnouncingPresence(firebaseDatabase, docId, peerId, databasePaths);
+      stopAnnouncingPresence(
+        firebaseDatabase,
+        docId,
+        peerId,
+        databasePaths,
+        logger
+      );
   } catch (e) {
-    console.warn("Failed to announce presence in Firebase:", e);
+    logger.warn("Failed to announce presence in Firebase:", e);
   }
 
   // 8) Start periodic persistence
@@ -203,7 +220,8 @@ export async function createFirebaseYWebrtcAdapter(
     ydoc,
     docId,
     syncIntervalMs,
-    databasePaths
+    databasePaths,
+    logger
   );
 
   // 8b) Set up synchronous persist handler for beforeunload
@@ -217,12 +235,13 @@ export async function createFirebaseYWebrtcAdapter(
         ydoc,
         docId,
         persistenceVersion++,
-        databasePaths
+        databasePaths,
+        logger
       ).catch((err) => {
-        console.warn("Unload persistence failed:", err);
+        logger.warn("Unload persistence failed:", err);
       });
     } catch (error) {
-      console.warn("Force persist sync error:", error);
+      logger.warn("Force persist sync error:", error);
     }
   };
 
@@ -243,7 +262,7 @@ export async function createFirebaseYWebrtcAdapter(
       // Clean up awareness states if needed
       const awarenessStates = awareness.getStates();
       if (awarenessStates.size > maxAwarenessStates) {
-        console.warn(
+        logger.warn(
           `Too many awareness states (${awarenessStates.size}), cleaning up`
         );
         // Get list of currently connected peers from peer manager
@@ -263,7 +282,7 @@ export async function createFirebaseYWebrtcAdapter(
         if (clientsToRemove.length > 0) {
           // Remove stale awareness states properly
           removeAwarenessStates(awareness, clientsToRemove, null);
-          console.log(
+          logger.debug(
             `Removed ${clientsToRemove.length} stale awareness states`
           );
         }
@@ -292,30 +311,30 @@ export async function createFirebaseYWebrtcAdapter(
     try {
       peerManager.destroy();
     } catch (e) {
-      console.warn("PeerManager destroy error:", e);
+      logger.warn("PeerManager destroy error:", e);
     }
     try {
       stopPersistence();
     } catch (e) {
-      console.warn("Persistence stop error:", e);
+      logger.warn("Persistence stop error:", e);
     }
     try {
       presenceCleanup?.();
     } catch (e) {
-      console.warn("Presence cleanup error:", e);
+      logger.warn("Presence cleanup error:", e);
     }
     try {
       // Destroy awareness first (before document cleanup)
       awareness.destroy();
     } catch (e) {
-      console.warn("Awareness destroy error:", e);
+      logger.warn("Awareness destroy error:", e);
     }
     try {
       // Final Y.js document cleanup
       // Note: Don't try to access or clear document contents after destroy
       ydoc.destroy();
     } catch (e) {
-      console.warn("Y.js document destroy error:", e);
+      logger.warn("Y.js document destroy error:", e);
     }
   };
 
@@ -332,7 +351,7 @@ export async function createFirebaseYWebrtcAdapter(
       // Y.js handles garbage collection automatically when ydoc.gc = true
       // GC runs incrementally during document operations - no manual triggering needed
       // This method is kept for API compatibility but is essentially a no-op
-      console.log(
+      logger.debug(
         "Y.js GC is automatic when ydoc.gc = true (current state:",
         ydoc.gc,
         ")"
@@ -346,11 +365,12 @@ export async function createFirebaseYWebrtcAdapter(
           ydoc,
           docId,
           persistenceVersion++,
-          databasePaths
+          databasePaths,
+          logger
         );
-        console.log("Document force-persisted successfully");
+        logger.debug("Document force-persisted successfully");
       } catch (error) {
-        console.error("Force persist failed:", error);
+        logger.error("Force persist failed:", error);
         throw error;
       }
     },

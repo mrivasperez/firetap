@@ -11,6 +11,9 @@
     "emulators": "firebase emulators:start",
     "build:lib": "npm run build -w lib",
     "dev:client": "npm run dev -w client",
-    "build:all": "npm run build -w lib && npm run build -w client"
+    "build:all": "npm run build -w lib && npm run build -w client",
+    "test": "npm test -w lib",
+    "test:emulator": "firebase emulators:exec --only database --project demo-firetap \"npm run test:emulator:run -w lib\"",
+    "typecheck": "npm run typecheck -w lib"
   }
 }

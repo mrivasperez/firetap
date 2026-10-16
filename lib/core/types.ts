@@ -3,6 +3,7 @@ import * as Y from "yjs";
 import { Awareness } from "y-protocols/awareness";
 import type { PeerInfo } from "../firebase/presence";
 import type { DatabasePathsConfig, ConnectionState } from "../utils/config";
+import type { Logger } from "../utils/logger";
 
 export type AdapterOptions = {
   docId: string;
@@ -13,6 +14,7 @@ export type AdapterOptions = {
   syncIntervalMs?: number;
   maxDirectPeers?: number;
   databasePaths?: DatabasePathsConfig;
+  logger?: Partial<Logger>;
 };
 
 // Event types for the adapter

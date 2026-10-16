@@ -2,6 +2,7 @@ import * as Y from 'yjs'
 import type { Database } from 'firebase/database'
 import { ref, set, get, serverTimestamp } from 'firebase/database'
 import { buildDatabasePaths, type DatabasePathsConfig } from '../utils/config'
+import { defaultLogger, type Logger } from '../utils/logger'
 
 // ============================================================================
 // CONSTANTS
@@ -41,7 +42,7 @@ export type DocumentSnapshot = {
   checksum: string
 }
 
-export async function loadDocumentFromFirebase(rtdb: Database, docId: string, databasePaths?: DatabasePathsConfig): Promise<Uint8Array | null> {
+export async function loadDocumentFromFirebase(rtdb: Database, docId: string, databasePaths?: DatabasePathsConfig, logger: Logger = defaultLogger): Promise<Uint8Array | null> {
   try {
     const paths = buildDatabasePaths(databasePaths || { structure: 'flat', flat: { documents: '/documents', rooms: '/rooms', snapshots: '/snapshots', signaling: '/signaling' } }, docId)
     
@@ -69,12 +70,12 @@ export async function loadDocumentFromFirebase(rtdb: Database, docId: string, da
     const binary = base64ToUint8Array(base64)
     return binary
   } catch (e) {
-    console.warn('loadDocumentFromFirebase error', e)
+    logger.warn('loadDocumentFromFirebase error', e)
     return null
   }
 }
 
-export function startPeriodicPersistence(rtdb: Database, ydoc: Y.Doc, docId: string, intervalMs = DEFAULT_PERSISTENCE_INTERVAL_MS, databasePaths?: DatabasePathsConfig) {
+export function startPeriodicPersistence(rtdb: Database, ydoc: Y.Doc, docId: string, intervalMs = DEFAULT_PERSISTENCE_INTERVAL_MS, databasePaths?: DatabasePathsConfig, logger: Logger = defaultLogger) {
   let persistenceCount = 0
   let lastPersistedStateVector: Uint8Array | null = null
   let debounceTimer: ReturnType<typeof setTimeout> | null = null
@@ -99,12 +100,12 @@ export function startPeriodicPersistence(rtdb: Database, ydoc: Y.Doc, docId: str
             !arraysAreEqual(currentStateVector, lastPersistedStateVector)
           
           if (stateVectorChanged) {
-            await persistDocument(rtdb, ydoc, docId, persistenceCount++, databasePaths)
+            await persistDocument(rtdb, ydoc, docId, persistenceCount++, databasePaths, logger)
             lastPersistedStateVector = currentStateVector
             hasChanges = false
           }
         } catch (err) {
-          console.warn('debounced persistence failed', err)
+          logger.warn('debounced persistence failed', err)
         }
       }
     }, PERSISTENCE_DEBOUNCE_MS) // 2 second debounce
@@ -122,13 +123,13 @@ export function startPeriodicPersistence(rtdb: Database, ydoc: Y.Doc, docId: str
           !arraysAreEqual(currentStateVector, lastPersistedStateVector)
         
         if (stateVectorChanged) {
-          await persistDocument(rtdb, ydoc, docId, persistenceCount++, databasePaths)
+          await persistDocument(rtdb, ydoc, docId, persistenceCount++, databasePaths, logger)
           lastPersistedStateVector = currentStateVector
           hasChanges = false
         }
       }
     } catch (err) {
-      console.warn('periodic persistence failed', err)
+      logger.warn('periodic persistence failed', err)
     }
   }, intervalMs)
 
@@ -144,7 +145,7 @@ export function startPeriodicPersistence(rtdb: Database, ydoc: Y.Doc, docId: str
   }
 }
 
-export async function persistDocument(rtdb: Database, ydoc: Y.Doc, docId: string, version?: number, databasePaths?: DatabasePathsConfig): Promise<void> {
+export async function persistDocument(rtdb: Database, ydoc: Y.Doc, docId: string, version?: number, databasePaths?: DatabasePathsConfig, logger: Logger = defaultLogger): Promise<void> {
   try {
     const paths = buildDatabasePaths(databasePaths || { structure: 'flat', flat: { documents: '/documents', rooms: '/rooms', snapshots: '/snapshots', signaling: '/signaling' } }, docId)
     
@@ -172,7 +173,7 @@ export async function persistDocument(rtdb: Database, ydoc: Y.Doc, docId: string
     // await set(ref(rtdb, `${paths.documents}`), { ... })
 
   } catch (error) {
-    console.error('Failed to persist document:', error)
+    logger.error('Failed to persist document:', error)
     throw error
   }
 }
@@ -180,7 +181,7 @@ export async function persistDocument(rtdb: Database, ydoc: Y.Doc, docId: string
 /**
  * Force immediate persistence if document has changes
  */
-export async function persistDocumentIfChanged(rtdb: Database, ydoc: Y.Doc, docId: string, lastKnownState?: string, version?: number, databasePaths?: DatabasePathsConfig): Promise<boolean> {
+export async function persistDocumentIfChanged(rtdb: Database, ydoc: Y.Doc, docId: string, lastKnownState?: string, version?: number, databasePaths?: DatabasePathsConfig, logger: Logger = defaultLogger): Promise<boolean> {
   try {
     const currentState = uint8ArrayToBase64(Y.encodeStateAsUpdate(ydoc))
     
@@ -189,10 +190,10 @@ export async function persistDocumentIfChanged(rtdb: Database, ydoc: Y.Doc, docI
       return false
     }
     
-    await persistDocument(rtdb, ydoc, docId, version, databasePaths)
+    await persistDocument(rtdb, ydoc, docId, version, databasePaths, logger)
     return true
   } catch (error) {
-    console.error('Failed to persist document changes:', error)
+    logger.error('Failed to persist document changes:', error)
     throw error
   }
 }
@@ -218,6 +219,7 @@ export function startSmartPersistence(
     maxIdleTimeMs?: number
     onPersist?: (version: number) => void
     databasePaths?: DatabasePathsConfig
+    logger?: Logger
   } = {}
 ) {
   const {
@@ -225,7 +227,8 @@ export function startSmartPersistence(
     debounceMs = 2_000,
     maxIdleTimeMs = 300_000, // 5 minutes max idle
     onPersist,
-    databasePaths
+    databasePaths,
+    logger = defaultLogger
   } = options
   
   let persistenceCount = 0
@@ -247,13 +250,13 @@ export function startSmartPersistence(
         try {
           const currentState = getDocumentStateHash(ydoc)
           if (currentState !== lastPersistedState) {
-            await persistDocument(rtdb, ydoc, docId, persistenceCount++, databasePaths)
+            await persistDocument(rtdb, ydoc, docId, persistenceCount++, databasePaths, logger)
             lastPersistedState = currentState
             hasChanges = false
             onPersist?.(persistenceCount - 1)
           }
         } catch (err) {
-          console.warn('Smart persistence failed:', err)
+          logger.warn('Smart persistence failed:', err)
         }
       }
     }, debounceMs)
@@ -274,14 +277,14 @@ export function startSmartPersistence(
       if (hasChanges) {
         const currentState = getDocumentStateHash(ydoc)
         if (currentState !== lastPersistedState) {
-          await persistDocument(rtdb, ydoc, docId, persistenceCount++, databasePaths)
+          await persistDocument(rtdb, ydoc, docId, persistenceCount++, databasePaths, logger)
           lastPersistedState = currentState
           hasChanges = false
           onPersist?.(persistenceCount - 1)
         }
       }
     } catch (err) {
-      console.warn('Periodic smart persistence failed:', err)
+      logger.warn('Periodic smart persistence failed:', err)
     }
   }, intervalMs)
 
@@ -296,7 +299,7 @@ export function startSmartPersistence(
   }
 }
 
-export async function createDocumentSnapshot(rtdb: Database, ydoc: Y.Doc, docId: string, label?: string, databasePaths?: DatabasePathsConfig): Promise<void> {
+export async function createDocumentSnapshot(rtdb: Database, ydoc: Y.Doc, docId: string, label?: string, databasePaths?: DatabasePathsConfig, logger: Logger = defaultLogger): Promise<void> {
   try {
     const paths = buildDatabasePaths(databasePaths || { structure: 'flat', flat: { documents: '/documents', rooms: '/rooms', snapshots: '/snapshots', signaling: '/signaling' } }, docId)
     
@@ -319,12 +322,12 @@ export async function createDocumentSnapshot(rtdb: Database, ydoc: Y.Doc, docId:
     
     await set(ref(rtdb, `${paths.snapshots}/${snapshotKey}`), snapshot)
   } catch (error) {
-    console.error('Failed to create snapshot:', error)
+    logger.error('Failed to create snapshot:', error)
     throw error
   }
 }
 
-export async function loadDocumentSnapshot(rtdb: Database, docId: string, snapshotKey: string, databasePaths?: DatabasePathsConfig): Promise<Uint8Array | null> {
+export async function loadDocumentSnapshot(rtdb: Database, docId: string, snapshotKey: string, databasePaths?: DatabasePathsConfig, logger: Logger = defaultLogger): Promise<Uint8Array | null> {
   try {
     const paths = buildDatabasePaths(databasePaths || { structure: 'flat', flat: { documents: '/documents', rooms: '/rooms', snapshots: '/snapshots', signaling: '/signaling' } }, docId)
     
@@ -336,12 +339,12 @@ export async function loadDocumentSnapshot(rtdb: Database, docId: string, snapsh
     const snapshot = snap.val() as DocumentSnapshot
     return base64ToUint8Array(snapshot.update)
   } catch (error) {
-    console.error('Failed to load snapshot:', error)
+    logger.error('Failed to load snapshot:', error)
     return null
   }
 }
 
-export async function getDocumentVersion(rtdb: Database, docId: string, databasePaths?: DatabasePathsConfig): Promise<number | null> {
+export async function getDocumentVersion(rtdb: Database, docId: string, databasePaths?: DatabasePathsConfig, logger: Logger = defaultLogger): Promise<number | null> {
   try {
     const paths = buildDatabasePaths(databasePaths || { structure: 'flat', flat: { documents: '/documents', rooms: '/rooms', snapshots: '/snapshots', signaling: '/signaling' } }, docId)
     
@@ -353,7 +356,7 @@ export async function getDocumentVersion(rtdb: Database, docId: string, database
     const snapshot = snap.val() as DocumentSnapshot
     return snapshot.version
   } catch (error) {
-    console.error('Failed to get document version:', error)
+    logger.error('Failed to get document version:', error)
     return null
   }
 }

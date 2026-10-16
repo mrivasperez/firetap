@@ -23,7 +23,8 @@
     "*.ts",
     "core/**/*",
     "firebase/**/*",
-    "utils/**/*"
+    "utils/**/*",
+    "test/**/*"
   ],
   "exclude": ["node_modules", "dist"]
 }

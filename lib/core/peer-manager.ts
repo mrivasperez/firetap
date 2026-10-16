@@ -33,6 +33,7 @@ import {
   CHUNK_HEADER_SIZE,
 } from "../utils/constants";
 import type { AdapterEvents, SignalData } from "./types";
+import { defaultLogger, type Logger } from "../utils/logger";
 
 export class SimplePeerManager {
   private docId: string;
@@ -53,6 +54,7 @@ export class SimplePeerManager {
   private connectionTimestamps = new Map<string, number>();
   private isDestroyed = false;
   private isTabVisible = true;
+  private logger: Logger;
 
   // Event system methods
   emit<K extends keyof AdapterEvents>(event: K, data: AdapterEvents[K]): void {
@@ -142,8 +144,10 @@ export class SimplePeerManager {
     awareness: Awareness,
     rtdb: Database,
     databasePaths: DatabasePathsConfig,
-    maxDirectPeers: number = 20
+    maxDirectPeers: number = 20,
+    logger: Logger = defaultLogger
   ) {
+    this.logger = logger;
     this.docId = docId;
     this.peerId = peerId;
     this.ydoc = ydoc;
@@ -168,7 +172,7 @@ export class SimplePeerManager {
       this.rtdb,
       `${this.getPaths().signaling}/${this.peerId}`
     );
-    console.log(
+    this.logger.debug(
       `Setting up granular signaling listener at: ${this.getPaths().signaling}/${
         this.peerId
       }`
@@ -179,14 +183,14 @@ export class SimplePeerManager {
       if (this.isDestroyed) return;
       
       const signal = snapshot.val() as SignalData;
-      console.log(`Received signal: ${signal.type} from ${signal.from}`);
+      this.logger.debug(`Received signal: ${signal.type} from ${signal.from}`);
       
       // Process the signal
       this.handleSignalData(signal);
       
       // Immediately clean up this specific signal
       remove(snapshot.ref).catch((error) => {
-        console.warn(`Failed to remove signal ${snapshot.key}:`, error);
+        this.logger.warn(`Failed to remove signal ${snapshot.key}:`, error);
       });
     });
 
@@ -216,7 +220,7 @@ export class SimplePeerManager {
         // Only create connection if we should be the initiator (deterministic)
         const shouldInitiate = this.peerId < otherPeerId;
         if (shouldInitiate) {
-          console.log(`New peer detected: ${otherPeerId}, initiating connection`);
+          this.logger.debug(`New peer detected: ${otherPeerId}, initiating connection`);
           this.createPeerConnection(otherPeerId, true);
         }
       }
@@ -228,7 +232,7 @@ export class SimplePeerManager {
       
       const peerId = snapshot.key!;
       if (peerId !== this.peerId && this.peers.has(peerId)) {
-        console.log(
+        this.logger.debug(
           `Peer ${peerId} removed from presence, cleaning up connection`
         );
         this.cleanupPeerConnection(peerId);
@@ -260,7 +264,7 @@ export class SimplePeerManager {
 
     // Prevent too many connections for memory optimization
     if (this.peers.size >= this.maxPeers) {
-      console.warn(
+      this.logger.warn(
         `Maximum peer connections reached (${this.maxPeers}), rejecting new connection to ${otherPeerId}`
       );
       return;
@@ -280,22 +284,22 @@ export class SimplePeerManager {
       if (event.candidate) {
         // With non-trickle ICE, candidates are automatically included in the SDP
         // No need to send them separately - this saves Firebase write costs
-        console.log(
+        this.logger.debug(
           `ICE candidate generated for ${otherPeerId} (will be bundled in SDP)`
         );
       } else {
         // null candidate means ICE gathering is complete
-        console.log(`ICE gathering complete for ${otherPeerId}`);
+        this.logger.debug(`ICE gathering complete for ${otherPeerId}`);
       }
     };
 
     // Handle connection state changes
     peerConnection.onconnectionstatechange = () => {
       const state = peerConnection.connectionState;
-      console.log(`Peer ${otherPeerId} connection state: ${state}`);
+      this.logger.debug(`Peer ${otherPeerId} connection state: ${state}`);
 
       if (state === "connected") {
-        console.log(`Peer ${otherPeerId} connected`);
+        this.logger.debug(`Peer ${otherPeerId} connected`);
         this.connectionTimestamps.set(otherPeerId, Date.now());
         this.emit("peer-joined", {
           peerId: otherPeerId,
@@ -312,7 +316,7 @@ export class SimplePeerManager {
         state === "disconnected" ||
         state === "closed"
       ) {
-        console.log(`Peer ${otherPeerId} ${state}`);
+        this.logger.debug(`Peer ${otherPeerId} ${state}`);
         this.cleanupPeerConnection(otherPeerId);
       }
     };
@@ -320,7 +324,7 @@ export class SimplePeerManager {
     // Handle data channel
     if (initiator) {
       // Create data channel as initiator
-      console.log(
+      this.logger.debug(
         `Creating data channel and offer for peer ${otherPeerId} (I am initiator)`
       );
       const dataChannel = peerConnection.createDataChannel("data");
@@ -331,7 +335,7 @@ export class SimplePeerManager {
       peerConnection
         .createOffer()
         .then((offer) => {
-          console.log(
+          this.logger.debug(
             `Created offer for ${otherPeerId}, setting local description`
           );
           return peerConnection.setLocalDescription(offer);
@@ -360,26 +364,26 @@ export class SimplePeerManager {
         })
         .then(() => {
           if (peerConnection.localDescription) {
-            console.log(
+            this.logger.debug(
               `ICE gathering complete, sending offer to ${otherPeerId}`
             );
             return this.sendOffer(otherPeerId, peerConnection.localDescription);
           }
         })
         .then(() => {
-          console.log(`Offer sent successfully to ${otherPeerId}`);
+          this.logger.debug(`Offer sent successfully to ${otherPeerId}`);
         })
         .catch((error) => {
-          console.error(`Error creating offer for ${otherPeerId}:`, error);
+          this.logger.error(`Error creating offer for ${otherPeerId}:`, error);
           this.cleanupPeerConnection(otherPeerId);
         });
     } else {
-      console.log(
+      this.logger.debug(
         `Waiting for offer from peer ${otherPeerId} (they are initiator)`
       );
       // Handle incoming data channel as receiver
       peerConnection.ondatachannel = (event) => {
-        console.log(`Received data channel from ${otherPeerId}`);
+        this.logger.debug(`Received data channel from ${otherPeerId}`);
         const dataChannel = event.channel;
         this.dataChannels.set(otherPeerId, dataChannel);
         this.setupDataChannel(otherPeerId, dataChannel);
@@ -389,7 +393,7 @@ export class SimplePeerManager {
 
   private setupDataChannel(peerId: string, dataChannel: RTCDataChannel): void {
     dataChannel.onopen = () => {
-      console.log(`Data channel opened for peer ${peerId}`);
+      this.logger.debug(`Data channel opened for peer ${peerId}`);
       
       // CRITICAL: Send initial document state when data channel opens
       // This ensures new peers receive the full document
@@ -406,13 +410,13 @@ export class SimplePeerManager {
             update: Array.from(update) 
           });
           dataChannel.send(message);
-          console.log(`Sent initial sync to peer ${peerId} (${update.length} bytes)`);
+          this.logger.debug(`Sent initial sync to peer ${peerId} (${update.length} bytes)`);
           
           // Track current state for next delta sync
           this.peerSyncState.set(peerId, Y.encodeStateVector(this.ydoc));
         }
       } catch (error) {
-        console.error(`Error sending initial sync to ${peerId}:`, error);
+        this.logger.error(`Error sending initial sync to ${peerId}:`, error);
       }
     };
 
@@ -430,7 +434,7 @@ export class SimplePeerManager {
           // Reuse Uint8Array to avoid extra allocations
           const updateArray = new Uint8Array(message.update);
           Y.applyUpdate(this.ydoc, updateArray, this);
-          console.log(`Applied sync update from peer ${peerId} (${updateArray.length} bytes)`);
+          this.logger.debug(`Applied sync update from peer ${peerId} (${updateArray.length} bytes)`);
         } else if (message.type === "sync-chunk" && message.update) {
           // Handle chunked sync message
           this.handleChunkedMessage(peerId, message);
@@ -441,23 +445,23 @@ export class SimplePeerManager {
             
             // OPTIMIZATION: Decompress if compressed flag is set
             if (message.compressed) {
-              awarenessUpdate = await decompressData(awarenessUpdate);
+              awarenessUpdate = await decompressData(awarenessUpdate, this.logger);
             }
             
             applyAwarenessUpdate(this.awareness, awarenessUpdate, null);
           }
         }
       } catch (error) {
-        console.error("Error parsing peer data:", error);
+        this.logger.error("Error parsing peer data:", error);
       }
     };
 
     dataChannel.onerror = (error) => {
-      console.error(`Data channel error for peer ${peerId}:`, error);
+      this.logger.error(`Data channel error for peer ${peerId}:`, error);
     };
 
     dataChannel.onclose = () => {
-      console.log(`Data channel closed for peer ${peerId}`);
+      this.logger.debug(`Data channel closed for peer ${peerId}`);
     };
   }
 
@@ -476,7 +480,7 @@ export class SimplePeerManager {
       timestamp: Date.now(),
     };
 
-    console.log(
+    this.logger.debug(
       `Pushing offer to Firebase path: ${
         this.getPaths().signaling
       }/${targetPeerId}`,
@@ -486,7 +490,7 @@ export class SimplePeerManager {
       ref(this.rtdb, `${this.getPaths().signaling}/${targetPeerId}`)
     );
     await set(messageRef, signalData);
-    console.log(`Offer successfully written to Firebase for ${targetPeerId}`);
+    this.logger.debug(`Offer successfully written to Firebase for ${targetPeerId}`);
   }
 
   private async sendAnswer(
@@ -504,12 +508,12 @@ export class SimplePeerManager {
       timestamp: Date.now(),
     };
 
-    console.log(`Sending answer to ${targetPeerId}`);
+    this.logger.debug(`Sending answer to ${targetPeerId}`);
     const messageRef = push(
       ref(this.rtdb, `${this.getPaths().signaling}/${targetPeerId}`)
     );
     await set(messageRef, signalData);
-    console.log(`Answer successfully written to Firebase for ${targetPeerId}`);
+    this.logger.debug(`Answer successfully written to Firebase for ${targetPeerId}`);
   }
 
   private handleSignalData(signalData: SignalData): void {
@@ -518,25 +522,25 @@ export class SimplePeerManager {
 
     if (!peer && type === "offer") {
       // Create peer connection for incoming offer
-      console.log(`Received offer from ${from}, creating peer connection`);
+      this.logger.debug(`Received offer from ${from}, creating peer connection`);
       this.createPeerConnection(from, false);
       peer = this.peers.get(from);
 
       if (!peer) {
-        console.error(`Failed to create peer connection for ${from}`);
+        this.logger.error(`Failed to create peer connection for ${from}`);
         return;
       }
 
       // Immediately handle the offer after creating the peer
-      console.log(`Set remote description from offer for ${from}`);
+      this.logger.debug(`Set remote description from offer for ${from}`);
       peer
         .setRemoteDescription(new RTCSessionDescription(signalData.sdp!))
         .then(() => {
-          console.log(`Set remote description for ${from}, creating answer`);
+          this.logger.debug(`Set remote description for ${from}, creating answer`);
           return peer!.createAnswer();
         })
         .then((answer) => {
-          console.log(`Created answer for ${from}, setting local description`);
+          this.logger.debug(`Created answer for ${from}, setting local description`);
           return peer!.setLocalDescription(answer);
         })
         .then(() => {
@@ -560,15 +564,15 @@ export class SimplePeerManager {
         })
         .then(() => {
           if (peer!.localDescription) {
-            console.log(`ICE gathering complete, sending answer to ${from}`);
+            this.logger.debug(`ICE gathering complete, sending answer to ${from}`);
             return this.sendAnswer(from, peer!.localDescription);
           }
         })
         .then(() => {
-          console.log(`Answer sent successfully to ${from}`);
+          this.logger.debug(`Answer sent successfully to ${from}`);
         })
         .catch((error) => {
-          console.error(`Error handling offer from ${from}:`, error);
+          this.logger.error(`Error handling offer from ${from}:`, error);
           this.cleanupPeerConnection(from);
         });
       return;
@@ -577,7 +581,7 @@ export class SimplePeerManager {
     if (!peer) {
       // With non-trickle ICE, we don't handle separate ICE candidates
       // They're bundled in the SDP, so we only need to warn about unexpected signals
-      console.warn(
+      this.logger.warn(
         `No peer connection found for ${from}, signal type: ${type}`
       );
       return;
@@ -586,22 +590,22 @@ export class SimplePeerManager {
     try {
       if (type === "offer" && signalData.sdp) {
         // This shouldn't happen since we handle offers above, but just in case
-        console.warn(`Received duplicate offer from ${from}, ignoring`);
+        this.logger.warn(`Received duplicate offer from ${from}, ignoring`);
       } else if (type === "answer" && signalData.sdp) {
         // Handle incoming answer
-        console.log(`Received answer from ${from}`);
+        this.logger.debug(`Received answer from ${from}`);
         peer
           .setRemoteDescription(new RTCSessionDescription(signalData.sdp))
           .then(() => {
-            console.log(`Set remote description from answer for ${from}`);
+            this.logger.debug(`Set remote description from answer for ${from}`);
           })
           .catch((error) => {
-            console.error(`Error handling answer from ${from}:`, error);
+            this.logger.error(`Error handling answer from ${from}:`, error);
             this.cleanupPeerConnection(from);
           });
       }
     } catch (error) {
-      console.error(`Error processing signal from ${from}:`, error);
+      this.logger.error(`Error processing signal from ${from}:`, error);
     }
   }
 
@@ -655,7 +659,7 @@ export class SimplePeerManager {
           // Update peer sync state after sending update
           this.peerSyncState.set(peerId, Y.encodeStateVector(this.ydoc));
         } catch (error) {
-          console.error(`Error sending update to peer ${peerId}:`, error);
+          this.logger.error(`Error sending update to peer ${peerId}:`, error);
         }
       }
     });
@@ -663,7 +667,7 @@ export class SimplePeerManager {
 
   async broadcastAwareness(update: Uint8Array): Promise<void> {
     // OPTIMIZATION: Compress awareness updates using native browser API (60-80% bandwidth reduction)
-    const { compressed, isCompressed } = await compressData(update);
+    const { compressed, isCompressed } = await compressData(update, this.logger);
     
     const message = JSON.stringify({
       type: "awareness",
@@ -676,7 +680,7 @@ export class SimplePeerManager {
         try {
           dataChannel.send(message);
         } catch (error) {
-          console.error(`Error sending awareness to peer ${peerId}:`, error);
+          this.logger.error(`Error sending awareness to peer ${peerId}:`, error);
         }
       }
     });
@@ -785,7 +789,7 @@ export class SimplePeerManager {
     // Clear message buffer if too large
     if (this.memoryStats.messageBuffer > MAX_MEMORY_BUFFER_BYTES) {
       // 10MB
-      console.warn("Message buffer too large, clearing older messages");
+      this.logger.warn("Message buffer too large, clearing older messages");
       this.messageBuffer.splice(0, Math.floor(this.messageBuffer.length / 2));
       this.memoryStats.messageBuffer = this.messageBuffer.reduce(
         (sum, msg) => sum + msg.size,
@@ -796,7 +800,7 @@ export class SimplePeerManager {
     // Clean up awareness states if too many
     const awarenessStates = this.awareness.getStates();
     if (awarenessStates.size > MAX_AWARENESS_STATES) {
-      console.warn("Too many awareness states, cleaning up old ones");
+      this.logger.warn("Too many awareness states, cleaning up old ones");
       // Remove stale awareness states (keep only connected peers)
       const connectedPeerIds = new Set(
         Array.from(this.peers.keys()).filter((id) => {
@@ -818,7 +822,7 @@ export class SimplePeerManager {
       if (clientsToRemove.length > 0) {
         // Properly remove stale awareness states
         removeAwarenessStates(this.awareness, clientsToRemove, null);
-        console.log(`Removed ${clientsToRemove.length} stale awareness states`);
+        this.logger.debug(`Removed ${clientsToRemove.length} stale awareness states`);
       }
     }
   }
@@ -837,7 +841,7 @@ export class SimplePeerManager {
       try {
         peer.close();
       } catch (e) {
-        console.warn(`Error closing peer ${peerId}:`, e);
+        this.logger.warn(`Error closing peer ${peerId}:`, e);
       }
       this.peers.delete(peerId);
     }
@@ -847,7 +851,7 @@ export class SimplePeerManager {
       try {
         dataChannel.close();
       } catch (e) {
-        console.warn(`Error closing data channel for ${peerId}:`, e);
+        this.logger.warn(`Error closing data channel for ${peerId}:`, e);
       }
       this.dataChannels.delete(peerId);
     }
@@ -866,9 +870,10 @@ export class SimplePeerManager {
       this.rtdb,
       this.docId,
       peerId,
-      this.databasePaths
+      this.databasePaths,
+      this.logger
     ).catch((error) =>
-      console.warn(`Failed to remove presence for ${peerId}:`, error)
+      this.logger.warn(`Failed to remove presence for ${peerId}:`, error)
     );
 
     this.emit("peer-left", { peerId });
@@ -887,16 +892,21 @@ export class SimplePeerManager {
       // Clean up stale connections
       this.connectionTimestamps.forEach((timestamp, peerId) => {
         if (now - timestamp > staleTimeout) {
-          console.log(`Cleaning up stale connection to peer ${peerId}`);
+          this.logger.debug(`Cleaning up stale connection to peer ${peerId}`);
           this.cleanupPeerConnection(peerId);
         }
       });
 
       // Clean up stale peers from Firebase
       try {
-        await cleanupStalePeers(this.rtdb, this.docId, this.databasePaths);
+        await cleanupStalePeers(
+          this.rtdb,
+          this.docId,
+          this.databasePaths,
+          this.logger
+        );
       } catch (error) {
-        console.warn("Failed to cleanup stale peers from Firebase:", error);
+        this.logger.warn("Failed to cleanup stale peers from Firebase:", error);
       }
 
       // Perform general memory cleanup
@@ -922,7 +932,7 @@ export class SimplePeerManager {
           await this.pendingPresenceUpdate;
         } catch (error) {
           // Ignore errors from previous update
-          console.warn("Previous presence update failed:", error);
+          this.logger.warn("Previous presence update failed:", error);
         }
       }
 
@@ -944,7 +954,7 @@ export class SimplePeerManager {
           };
           await set(peerRef, currentData);
         } catch (error) {
-          console.warn("Failed to update heartbeat:", error);
+          this.logger.warn("Failed to update heartbeat:", error);
           throw error; // Re-throw to mark promise as rejected
         } finally {
           this.pendingPresenceUpdate = null;
@@ -999,7 +1009,7 @@ export class SimplePeerManager {
           this.persistDocumentSync();
         }
       } catch (error) {
-        console.warn("Error persisting document on unload:", error);
+        this.logger.warn("Error persisting document on unload:", error);
       }
 
       // Synchronously clean up our presence on actual page unload
@@ -1010,7 +1020,7 @@ export class SimplePeerManager {
         // Just attempt direct cleanup as best effort
         remove(peerRef);
       } catch (error) {
-        console.warn("Error in beforeunload cleanup:", error);
+        this.logger.warn("Error in beforeunload cleanup:", error);
       }
     };
 
@@ -1022,7 +1032,7 @@ export class SimplePeerManager {
 
       if (isNowVisible && !this.isTabVisible) {
         // Tab became visible - resume activity
-        console.log("Tab visible: resuming collaboration");
+        this.logger.debug("Tab visible: resuming collaboration");
         this.isTabVisible = true;
 
         // Resume heartbeat immediately
@@ -1045,14 +1055,14 @@ export class SimplePeerManager {
             lastSeen: Date.now(),
           });
         } catch (error) {
-          console.warn("Failed to update presence on tab visible:", error);
+          this.logger.warn("Failed to update presence on tab visible:", error);
         }
 
         // Check peer connections and reconnect if needed
         this.checkAndReconnectPeers();
       } else if (!isNowVisible && this.isTabVisible) {
         // Tab became hidden - pause heartbeat to save resources
-        console.log("Tab hidden: pausing heartbeat (connections maintained)");
+        this.logger.debug("Tab hidden: pausing heartbeat (connections maintained)");
         this.isTabVisible = false;
         // Note: We don't stop heartbeat completely, just rely on existing interval
         // Firebase will keep connection alive, and onDisconnect() will handle cleanup if needed
@@ -1076,7 +1086,7 @@ export class SimplePeerManager {
 
     if (connectedPeers === 0 && this.peers.size > 0) {
       // We have peer objects but none are connected - clean up and reconnect
-      console.log(
+      this.logger.debug(
         "No active peer connections after tab visible, reconnecting..."
       );
 
@@ -1093,9 +1103,14 @@ export class SimplePeerManager {
 
       // Force a cleanup to discover peers again
       try {
-        await cleanupStalePeers(this.rtdb, this.docId, this.databasePaths);
+        await cleanupStalePeers(
+          this.rtdb,
+          this.docId,
+          this.databasePaths,
+          this.logger
+        );
       } catch (error) {
-        console.warn("Failed to cleanup stale peers on reconnect:", error);
+        this.logger.warn("Failed to cleanup stale peers on reconnect:", error);
       }
     }
   }
@@ -1112,7 +1127,7 @@ export class SimplePeerManager {
       try {
         peer.close();
       } catch (e) {
-        console.warn("Error closing peer:", e);
+        this.logger.warn("Error closing peer:", e);
       }
     });
     this.peers.clear();
@@ -1122,7 +1137,7 @@ export class SimplePeerManager {
       try {
         dataChannel.close();
       } catch (e) {
-        console.warn("Error closing data channel:", e);
+        this.logger.warn("Error closing data channel:", e);
       }
     });
     this.dataChannels.clear();

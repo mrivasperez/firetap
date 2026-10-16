@@ -9,6 +9,7 @@ export type {
   AdapterEvents,
   SignalData
 } from './core/types'
+export type { Logger } from './utils/logger'
 
 // Configuration utilities
 export { 
