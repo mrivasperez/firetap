@@ -1,38 +1,36 @@
-// Peer Connection Configuration
-export const DEFAULT_MAX_DIRECT_PEERS = 20; // Maximum number of WebRTC peer connections
-export const PEER_PRESENCE_TIMEOUT_MS = 600_000; // 10 minutes - consider peer stale if not seen (2x heartbeat)
-export const PEER_ID_DISPLAY_LENGTH = 6; // Number of characters to show in peer ID
+export const DEFAULT_MAX_DIRECT_PEERS = 6;
+export const TOPOLOGY_SETTLE_MS = 200;
+export const PEER_ID_DISPLAY_LENGTH = 6;
 
-// Memory Management
-export const MAX_MESSAGE_BUFFER_SIZE = 1_000; // Maximum number of messages to keep in buffer
-export const MESSAGE_BUFFER_RETENTION_MS = 3_600_000; // 1 hour - how long to keep messages in buffer
-export const IDLE_PEER_TIMEOUT_MS = 300_000; // 5 minutes - timeout for idle peer connections
-export const MAX_MEMORY_BUFFER_BYTES = 10 * 1024 * 1024; // 10MB - max message buffer size in bytes
-export const MAX_AWARENESS_STATES = 50; // Maximum number of awareness states before cleanup
+export const CONNECT_TIMEOUT_MS = 30_000;
+export const DISCONNECT_GRACE_MS = 5_000;
+export const RETRY_BASE_MS = 2_000;
+export const RETRY_MAX_MS = 60_000;
+export const ICE_GATHERING_MAX_MS = 3_000;
+export const ICE_SETTLE_MS = 300;
+export const ANTI_ENTROPY_INTERVAL_MS = 30_000;
+export const ISOLATION_DELAY_MS = 5_000;
+export const PEER_LOAD_TIMEOUT_MS = 2_000;
+export const PRESENCE_SETTLE_MS = 500;
 
-// Cleanup & Heartbeat Intervals
-export const CLEANUP_INTERVAL_MS = 300_000; // 5 minutes - interval for periodic cleanup
-export const HEARTBEAT_INTERVAL_MS = 300_000; // 5 minutes - interval for presence heartbeat (optimized for cost savings)
-export const STALE_CONNECTION_TIMEOUT_MS = 600_000; // 10 minutes - timeout for stale connections
-export const MEMORY_CHECK_INTERVAL_MS = 300_000; // 5 minutes - interval for memory monitoring
-export const MIN_VISIBILITY_UPDATE_INTERVAL = 120_000; // 2 minutes - throttle for visibility change updates
+export const DEFAULT_PERSIST_DEBOUNCE_MS = 1_000;
+export const PERSIST_RETRY_BASE_MS = 1_000;
+export const PERSIST_RETRY_MAX_MS = 30_000;
+export const DISCONNECT_FLUSH_TIMEOUT_MS = 5_000;
+export const RESCUE_JITTER_MS = 3_000;
+// Firebase rejects strings over 10MB.
+export const STORED_PART_CHARS = 8 * 1024 * 1024;
+export const LOG_ENTRY_GZIP_MIN_BYTES = 1024;
+export const MERGE_MIN_LOG_BYTES = 8 * 1024;
+export const MERGE_MAX_LOG_BYTES = 256 * 1024;
+export const MERGE_LEASE_MS = 60_000;
+export const MERGE_SETTLE_MS = 5_000;
+export const LOAD_MAX_ATTEMPTS = 3;
 
-// Default Configuration
-export const DEFAULT_SYNC_INTERVAL_MS = 30_000; // 30 seconds - Firebase persistence (not realtime sync)
+export const AWARENESS_THROTTLE_MS = 50;
 
-// Awareness Throttling Configuration
-export const AWARENESS_THROTTLE_MS = 50; // 50ms = 20 updates/second - smooth cursors without jitter
-export const LOCAL_AWARENESS_THROTTLE_MS = 16; // ~60fps for local cursor updates
+export const USE_NATIVE_COMPRESSION = typeof CompressionStream !== 'undefined';
 
-// Compression Configuration
-export const COMPRESSION_THRESHOLD = 512; // Only compress messages larger than 512 bytes (increased threshold)
-export const USE_NATIVE_COMPRESSION = typeof CompressionStream !== 'undefined'; // Check browser support
-
-// WebRTC Data Channel Configuration
-export const MAX_CHUNK_SIZE = 32_000; // 32KB - increased from 16KB for better throughput with large docs
-export const CHUNK_HEADER_SIZE = 200; // Reserve space for JSON overhead
-
-// WebRTC Configuration
 export const STUN_SERVERS = [
   { urls: "stun:stun.l.google.com:19302" },
   { urls: "stun:stun1.l.google.com:19302" },

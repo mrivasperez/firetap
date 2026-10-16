@@ -1,47 +1,57 @@
 import type { Database } from "firebase/database";
 import * as Y from "yjs";
 import { Awareness } from "y-protocols/awareness";
-import type { PeerInfo } from "../firebase/presence";
 import type { DatabasePathsConfig, ConnectionState } from "../utils/config";
+import type { Logger } from "../utils/logger";
+import type { SaveState } from "../firebase/document-store";
 
 export type AdapterOptions = {
   docId: string;
-  // Firebase database instance (required for dependency injection)
   firebaseDatabase: Database;
   peerId?: string;
   user?: { name?: string };
-  syncIntervalMs?: number;
+  // Local edits are batched for this long before being written (default 1000ms).
+  persistDebounceMs?: number;
+  // Direct WebRTC links per peer (default 6); larger rooms relay through peers.
   maxDirectPeers?: number;
   databasePaths?: DatabasePathsConfig;
+  // "auto" (default): when no peer is reachable, receive edits from Firebase instead.
+  firebaseFallback?: "auto" | "off";
+  // Keep the last downloaded snapshot in IndexedDB so reopening skips the download
+  // (default true). Turn off if document content mustn't stay on the device.
+  localCache?: boolean;
+  // STUN/TURN servers for WebRTC (default: Google's public STUN servers). Add a TURN
+  // server so peers behind strict firewalls can still connect directly.
+  iceServers?: RTCIceServer[];
+  logger?: Partial<Logger>;
 };
 
-// Event types for the adapter
 export type AdapterEvents = {
   "connection-state-changed": { state: ConnectionState };
   "peer-joined": { peerId: string; user: PeerInfo };
   "peer-left": { peerId: string };
   "document-persisted": { docId: string; version: number };
+  "save-state-changed": { state: SaveState };
+  // Retried automatically; saveState stays "error" until a write succeeds.
+  "persist-error": { error: Error };
   error: { error: Error; context: string };
-  "sync-completed": { docId: string; updateSize: number };
-  "awareness-updated": { peerId: string; user: PeerInfo };
+  // The first sync with a newly connected peer finished.
+  "sync-completed": { docId: string; peerId: string; updateSize: number };
 };
 
 export type AdapterHandle = {
   ydoc: Y.Doc;
   awareness: Awareness;
-  disconnect: () => void;
+  /** Saves pending edits (waiting up to 5s), then leaves. */
+  disconnect: () => Promise<void>;
   reconnect: () => Promise<void>;
   getPeerCount: () => number;
   getConnectionStatus: () => ConnectionState;
   getUserInfo: () => PeerInfo;
-  getMemoryStats: () => {
-    messageBuffer: number;
-    connectionCount: number;
-    lastCleanup: number;
-    awarenessStates: number;
-  };
-  forceGarbageCollection: () => void;
-  forcePersist: () => Promise<void>;
+  /** Resolves once Firebase has acknowledged every pending edit. */
+  flush: () => Promise<void>;
+  hasUnsavedChanges: () => boolean;
+  getSaveState: () => SaveState;
   on: <K extends keyof AdapterEvents>(
     event: K,
     callback: (data: AdapterEvents[K]) => void
@@ -52,10 +62,22 @@ export type AdapterHandle = {
   ) => void;
 };
 
+export type PeerInfo = {
+  id: string;
+  name: string;
+  connectedAt: number;
+};
+
+export type PresenceEntry = {
+  name: string;
+  connectedAt: number | object; // server timestamp
+};
+
 export type SignalData = {
   type: "offer" | "answer";
-  sdp?: RTCSessionDescriptionInit;
+  sdp?: string;
+  sdpGz?: string;
   from: string;
-  to: string;
-  timestamp: number;
+  // Lets the initiator ignore a late answer to an offer it has replaced.
+  connectionId: string;
 };

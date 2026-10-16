@@ -1,0 +1,44 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      # The Realtime Database emulator runs on the JVM.
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 21
+
+      - run: npm ci
+      - run: npm install -g firebase-tools@15
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Build library
+        run: npm run build:lib
+
+      - name: README examples typecheck
+        run: npm run check:readme -w lib
+
+      - name: Unit tests
+        run: npm test
+
+      - name: Emulator tests
+        run: npm run test:emulator
+
+      - name: Build demo client
+        run: npm run build -w client

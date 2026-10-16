@@ -1,454 +1,219 @@
 # Firetap
 
-**Real-time collaborative editing adapter for TipTap, Yjs, and Firebase Realtime Database**
+Real-time collaborative editing for [Yjs](https://docs.yjs.dev/) and [TipTap](https://tiptap.dev/), using WebRTC between collaborators and Firebase Realtime Database for storage.
 
-Firetap is a high-performance, cost-optimized adapter that enables seamless real-time collaboration in your applications using Yjs CRDTs, Firebase Realtime Database for persistence, and WebRTC for peer-to-peer synchronization.
+- **Edits travel peer to peer.** People editing the same document sync directly over WebRTC, so live editing doesn't go through Firebase.
+- **Firebase stores the document and introduces peers.** Edits are saved to Firebase as they happen, and Firebase carries presence and the WebRTC handshake.
+- **It's built to keep the Firebase bill small.** Documents are stored compressed, new collaborators get the document from people who already have it open, and browsers cache it between visits.
 
-## Why Firetap?
-
-### Performance First
-
-- **Hybrid Architecture**: Combines Firebase Realtime Database for persistence with WebRTC mesh networking for real-time sync
-- **Zero External Dependencies for Compression**: Uses native browser `CompressionStream` API (gzip) to reduce payload sizes
-- **Intelligent Data Flow**: Direct peer-to-peer sync for active collaboration, Firebase only for persistence and signaling
-- **Automatic Garbage Collection**: Configurable Y.js GC to prevent memory bloat in long-running sessions
-
-### Firebase Cost Optimization
-
-Firebase Realtime Database charges for:
-- **Storage**: $5/GB/month
-- **Downloads**: All bytes downloaded including protocol overhead, SSL encryption, and connection handshakes
-
-**Firetap minimizes these costs through:**
-
-#### 1. **Dramatic Bandwidth Reduction**
-- **Native Gzip Compression**: Automatically compresses updates > 1KB, typically achieving 60-80% size reduction
-- **WebRTC Mesh Networking**: Active collaborators sync directly peer-to-peer, bypassing Firebase entirely
-- **Batched Updates**: Awareness states throttled to prevent excessive Firebase writes
-- **Smart Persistence**: Only periodic snapshots written to Firebase, not every keystroke
-
-#### 2. **Connection Cost Optimization**
-- **Persistent Connections**: Uses Firebase SDK's native WebSocket connection (not REST API)
-- **Reduced SSL Handshakes**: Single long-lived connection vs. multiple HTTPS requests
-- **Minimal Protocol Overhead**: WebRTC handles real-time sync, Firebase only for initial load and signaling
-
-#### 3. **Storage Efficiency**
-- **Compressed Snapshots**: Document snapshots stored in gzip format when beneficial
-- **Periodic Cleanup**: Automatic cleanup of stale signaling data and peer presence
-- **Efficient Data Structures**: Flat or workspace-based paths to minimize nested reads
-
-#### Real-World Cost Impact
-
-**Traditional approach** (REST API, every update through Firebase):
-```
-100 users × 100 updates/min × 5KB/update × 60 min = 3GB/hour
-= $0.15/hour in bandwidth alone
-```
-
-**Firetap approach** (WebRTC mesh + compression):
-```
-100 users × 1 initial load × 50KB (compressed) = 5MB
-+ periodic snapshots × 10/hour × 50KB = 500KB
-= ~6MB/hour = $0.0003/hour
-```
-
-**Savings: ~99.8% reduction in Firebase bandwidth costs for active collaboration sessions**
-
-## Installation
+## Install
 
 ```bash
 npm install firetap yjs y-protocols firebase
 ```
 
-## Quick Start
+Firetap runs in the browser: it needs WebRTC, and uses `CompressionStream` and IndexedDB when they're available.
 
-### Basic Setup
+## Quick start
 
-```typescript
-import { createFirebaseYWebrtcAdapter } from 'firetap';
-import { initializeApp } from 'firebase/app';
-import { getDatabase } from 'firebase/database';
+```ts
+import { initializeApp } from 'firebase/app'
+import { getDatabase } from 'firebase/database'
+import { createFirebaseYWebrtcAdapter } from 'firetap'
 
-// Initialize Firebase
-const firebaseApp = initializeApp({
-  databaseURL: 'https://your-project.firebaseio.com',
-});
-const database = getDatabase(firebaseApp);
+const app = initializeApp({ databaseURL: 'https://your-project-default-rtdb.firebaseio.com' })
 
-// Create adapter
 const adapter = await createFirebaseYWebrtcAdapter({
   docId: 'my-document',
-  firebaseDatabase: database,
-  user: {
-    name: 'Alice',
-    color: '#ff0000',
-  },
-});
+  firebaseDatabase: getDatabase(app),
+  user: { name: 'Alice' },
+})
 
-// Access Y.Doc and Awareness
-const { ydoc, awareness } = adapter;
+// A regular Y.Doc and y-protocols Awareness: use them with any Yjs binding.
+adapter.ydoc.getText('notes').insert(0, 'Hello')
 
-// Clean up when done
-adapter.destroy();
+// When you're done: saves pending edits, then leaves.
+await adapter.disconnect()
 ```
+
+`createFirebaseYWebrtcAdapter` resolves once the document is loaded. If it can't be read from Firebase, it rejects with a `LoadError` rather than opening an empty document.
 
 ### With TipTap
 
-```typescript
-import { Editor } from '@tiptap/core';
-import StarterKit from '@tiptap/starter-kit';
-import Collaboration from '@tiptap/extension-collaboration';
-import CollaborationCursor from '@tiptap/extension-collaboration-cursor';
-import { createFirebaseYWebrtcAdapter } from 'firetap';
+```ts
+import { Editor } from '@tiptap/core'
+import StarterKit from '@tiptap/starter-kit'
+import Collaboration from '@tiptap/extension-collaboration'
+import CollaborationCaret from '@tiptap/extension-collaboration-caret'
+import { getDatabase } from 'firebase/database'
+import { createFirebaseYWebrtcAdapter } from 'firetap'
 
 const adapter = await createFirebaseYWebrtcAdapter({
-  docId: 'my-doc',
-  firebaseDatabase: database,
-  user: { name: 'Alice', color: '#ff0000' },
-});
+  docId: 'my-document',
+  firebaseDatabase: getDatabase(),
+  user: { name: 'Alice' },
+})
 
 const editor = new Editor({
+  element: document.querySelector<HTMLElement>('#editor')!,
   extensions: [
-    StarterKit.configure({
-      history: false, // Disable local history (Yjs handles this)
-    }),
-    Collaboration.configure({
-      document: adapter.ydoc,
-    }),
-    CollaborationCursor.configure({
-      provider: adapter.awareness,
-      user: { name: 'Alice', color: '#ff0000' },
+    StarterKit.configure({ undoRedo: false }), // Yjs handles undo
+    Collaboration.configure({ document: adapter.ydoc }),
+    CollaborationCaret.configure({
+      provider: { awareness: adapter.awareness },
+      user: { name: 'Alice', color: '#f783ac' },
     }),
   ],
-});
+})
 ```
 
-## Configuration
+## Saving
 
-### Simple Configuration
+Each client writes the edits it makes to Firebase about a second after they happen (`persistDebounceMs`). Pending edits are also written when the page is hidden or closed, and by `disconnect()`.
 
-```typescript
-import { createSimpleConfig } from 'firetap';
+Firetap reports save state, and leaves what to show the user up to your app:
 
-const adapter = await createFirebaseYWebrtcAdapter({
-  docId: 'my-document',
-  firebaseDatabase: database,
-  databasePaths: createSimpleConfig(), // Uses default flat structure
-  syncIntervalMs: 30000, // Save to Firebase every 30 seconds
-  maxDirectPeers: 5, // Max WebRTC connections per peer
-});
-```
+```ts
+import { getDatabase } from 'firebase/database'
+import { createFirebaseYWebrtcAdapter } from 'firetap'
 
-### Workspace Configuration
+const adapter = await createFirebaseYWebrtcAdapter({ docId: 'doc', firebaseDatabase: getDatabase() })
 
-```typescript
-import { createWorkspaceConfig } from 'firetap';
+// Warn before leaving with edits that haven't reached Firebase.
+window.addEventListener('beforeunload', (event) => {
+  if (adapter.hasUnsavedChanges()) event.preventDefault()
+})
 
-const adapter = await createFirebaseYWebrtcAdapter({
-  docId: 'my-document',
-  firebaseDatabase: database,
-  databasePaths: createWorkspaceConfig('workspace-123'),
-  user: {
-    name: 'Alice',
-    color: '#ff0000',
-    id: 'user-456',
-  },
-});
-```
+// Show save status: 'saved' | 'saving' | 'unsaved' | 'error'.
+adapter.on('save-state-changed', ({ state }) => {
+  document.title = state === 'saved' ? 'My document' : `My document (${state})`
+})
 
-### Advanced Configuration
-
-```typescript
-import { buildDatabasePaths } from 'firetap';
-
-const adapter = await createFirebaseYWebrtcAdapter({
-  docId: 'my-document',
-  firebaseDatabase: database,
-  databasePaths: {
-    structure: 'workspace',
-    workspace: {
-      workspaceId: 'my-workspace',
-      basePath: '/workspaces',
-    },
-  },
-  syncIntervalMs: 60000, // Persist every 60 seconds
-  maxDirectPeers: 10, // Allow up to 10 WebRTC connections
-  peerId: 'custom-peer-id', // Optional custom peer ID
-});
-```
-
-## API Reference
-
-### `createFirebaseYWebrtcAdapter(options)`
-
-Creates a new Firetap adapter instance.
-
-**Options:**
-
-| Option | Type | Default | Description |
-|--------|------|---------|-------------|
-| `docId` | `string` | Required | Unique document identifier |
-| `firebaseDatabase` | `Database` | Required | Firebase Realtime Database instance |
-| `peerId` | `string` | `crypto.randomUUID()` | Unique peer identifier |
-| `user` | `UserInfo` | `{}` | User information for awareness |
-| `syncIntervalMs` | `number` | `30000` | Firebase persistence interval (ms) |
-| `maxDirectPeers` | `number` | `5` | Max simultaneous WebRTC connections |
-| `databasePaths` | `DatabasePathsConfig` | Flat structure | Firebase path configuration |
-
-**Returns:** `Promise<AdapterHandle>`
-
-### AdapterHandle
-
-```typescript
-interface AdapterHandle {
-  ydoc: Y.Doc;              // Yjs document
-  awareness: Awareness;      // Awareness instance
-  destroy: () => void;       // Cleanup function
-  on: (event, callback) => void;     // Event listener
-  off: (event, callback) => void;    // Remove event listener
-  reconnect: () => Promise<void>;    // Reconnect to Firebase
+// Make sure everything is saved before doing something that depends on it.
+async function exportDocument() {
+  await adapter.flush()
 }
 ```
 
+A failed write is retried automatically; `persist-error` is emitted and the save state stays `'error'` until a retry succeeds.
+
+## Options
+
+| Option | Default | |
+|---|---|---|
+| `docId` | required | Document identifier. Can't contain `. # $ [ ] /`. |
+| `firebaseDatabase` | required | The `Database` from `getDatabase()`. |
+| `user` | `{ name: 'User-xxxxxx' }` | Shown to other collaborators. |
+| `peerId` | random UUID | Identifies this client. Must be unique per open document, so don't reuse a user id across tabs. |
+| `persistDebounceMs` | `1000` | How long local edits are batched before being written. |
+| `maxDirectPeers` | `6` | WebRTC connections per client. Larger rooms relay edits through other peers. |
+| `firebaseFallback` | `'auto'` | If no peer can be reached, receive others' edits from Firebase. `'off'` disables it. |
+| `localCache` | `true` | Keep the last downloaded snapshot in IndexedDB so reopening skips the download. Turn off if document content must not stay on the device. |
+| `iceServers` | Google's public STUN servers | STUN and TURN servers for WebRTC. Add a TURN server so peers behind strict firewalls can connect. |
+| `databasePaths` | `/documents/{docId}/...` | Where data is stored; see [Database layout](#database-layout). |
+| `logger` | warnings and errors to the console | Any object with `debug`, `info`, `warn` and `error` methods, e.g. `console` for everything. |
+
+## The adapter
+
+| | |
+|---|---|
+| `ydoc`, `awareness` | The document and presence state for your Yjs bindings. |
+| `disconnect()` | Saves pending edits (waiting up to 5 seconds), then leaves. Returns a promise. |
+| `reconnect()` | Drops and re-establishes every connection. |
+| `flush()` | Resolves once Firebase has acknowledged all pending edits. |
+| `hasUnsavedChanges()` | Whether some local edits haven't been acknowledged yet. |
+| `getSaveState()` | `'saved'`, `'saving'`, `'unsaved'` or `'error'`. |
+| `getConnectionStatus()` | Firebase connection: `'connecting'`, `'connected'` or `'disconnected'`. |
+| `getPeerCount()` | Number of direct WebRTC connections. |
+| `getUserInfo()` | This client's `{ id, name, connectedAt }`. |
+| `on(event, callback)`, `off(event, callback)` | Subscribe to events. |
+
 ### Events
 
-```typescript
-adapter.on('connection-state-changed', ({ state }) => {
-  console.log('Connection state:', state); // 'connecting' | 'connected' | 'disconnected'
-});
+| Event | Payload | When |
+|---|---|---|
+| `connection-state-changed` | `{ state }` | The Firebase connection goes up or down. |
+| `peer-joined` | `{ peerId, user }` | A direct WebRTC connection is established. |
+| `peer-left` | `{ peerId }` | A direct connection closed. |
+| `sync-completed` | `{ docId, peerId, updateSize }` | The first sync with a newly connected peer finished. |
+| `save-state-changed` | `{ state }` | The save state changed. |
+| `persist-error` | `{ error }` | A write to Firebase failed (it will be retried). |
+| `document-persisted` | `{ docId, version }` | Recent edits were merged into a new stored snapshot. |
+| `error` | `{ error, context }` | Something else failed, e.g. announcing presence. |
 
-adapter.on('peer-connected', ({ peerId }) => {
-  console.log('Peer connected:', peerId);
-});
+## Database layout
 
-adapter.on('peer-disconnected', ({ peerId }) => {
-  console.log('Peer disconnected:', peerId);
-});
+By default everything for a document lives under `/documents/{docId}`:
 
-adapter.on('sync-complete', () => {
-  console.log('Initial sync complete');
-});
+| Path | Contents |
+|---|---|
+| `meta` | Which snapshot is current. |
+| `snapshots/{key}` | The document, gzip-compressed. |
+| `updates/{key}` | Edits made since that snapshot. Each client appends only its own. |
+| `rooms/peers/{peerId}` | Who has the document open. Removed automatically when a client disconnects. |
+| `signaling/{peerId}/{key}` | WebRTC offers and answers, deleted once read. |
+
+To store documents elsewhere, pass `databasePaths`:
+
+```ts
+import type { DatabasePathsConfig } from 'firetap'
+
+// /workspaces/acme/docs/{docId}/...
+const nested: DatabasePathsConfig = { structure: 'nested', nested: { basePath: '/workspaces/acme/docs' } }
+
+// Separate roots: /presence/{docId}, /updates/{docId}, ...
+const flat: DatabasePathsConfig = { structure: 'flat', flat: { rooms: '/presence' } }
 ```
 
-## Utility Functions
+### Security rules
 
-### Configuration Helpers
-
-```typescript
-import {
-  createSimpleConfig,
-  createWorkspaceConfig,
-  createAdapterConfig,
-  validateConfig,
-  generateUserId,
-  buildDatabasePaths,
-  DEFAULT_DATABASE_PATHS,
-  DEFAULT_CONFIG,
-} from 'firetap';
-
-// Generate unique user ID
-const userId = generateUserId();
-
-// Create simple flat structure config
-const simpleConfig = createSimpleConfig();
-
-// Create workspace-based config
-const workspaceConfig = createWorkspaceConfig('workspace-id');
-
-// Validate configuration
-const isValid = validateConfig(myConfig);
-
-// Build database paths
-const paths = buildDatabasePaths(config);
-```
-
-### Constants
-
-```typescript
-import {
-  DEFAULT_MAX_DIRECT_PEERS,      // 5
-  PEER_PRESENCE_TIMEOUT_MS,      // 60000 (1 minute)
-  COMPRESSION_THRESHOLD,         // 1024 bytes
-  DEFAULT_SYNC_INTERVAL_MS,      // 30000 (30 seconds)
-  AWARENESS_THROTTLE_MS,         // 1000 (1 second)
-  MAX_AWARENESS_STATES,          // 100
-  HEARTBEAT_INTERVAL_MS,         // 30000
-  STALE_CONNECTION_TIMEOUT_MS,   // 180000 (3 minutes)
-} from 'firetap';
-```
-
-## Architecture
-
-### Data Flow
-
-```
-┌─────────────────────────────────────────────────────────────┐
-│                    Active Collaboration                      │
-│                                                              │
-│  Peer A ←─────── WebRTC Mesh ───────→ Peer B               │
-│    ↑                                      ↑                  │
-│    │                                      │                  │
-│    └──────────── WebRTC ─────────────────┘                  │
-│                                                              │
-│  (Real-time sync happens peer-to-peer, zero Firebase cost)  │
-└─────────────────────────────────────────────────────────────┘
-
-┌─────────────────────────────────────────────────────────────┐
-│                   Persistence Layer                          │
-│                                                              │
-│            Firebase Realtime Database                        │
-│  ┌─────────────────────────────────────────────────┐       │
-│  │  Periodic Snapshots (compressed, every 30s)     │       │
-│  │  Signaling Data (for WebRTC handshake)         │       │
-│  │  Peer Presence (heartbeats, auto-cleanup)      │       │
-│  └─────────────────────────────────────────────────┘       │
-│                                                              │
-│  (Minimal Firebase usage, optimized for cost)               │
-└─────────────────────────────────────────────────────────────┘
-```
-
-### Key Optimizations
-
-1. **WebRTC Mesh Network**: Peers sync directly, Firebase only stores periodic snapshots
-2. **Native Compression**: Gzip compression using browser APIs (no external dependencies)
-3. **Smart Throttling**: Awareness updates batched, presence heartbeats optimized
-4. **Automatic Cleanup**: Stale data removed periodically to reduce storage costs
-5. **Memory Management**: Y.js garbage collection prevents memory leaks
-6. **Connection Pooling**: Single Firebase WebSocket connection per client
-
-## Security
-
-Firetap works with Firebase Realtime Database Security Rules:
+Firetap doesn't authenticate users; protect documents with Firebase Authentication and security rules. A starting point for the default layout, assuming your app keeps an access list at `/access/{docId}/{uid}`:
 
 ```json
 {
   "rules": {
     "documents": {
       "$docId": {
-        ".read": "auth != null",
-        ".write": "auth != null"
-      }
-    },
-    "rooms": {
-      "$docId": {
-        "peers": {
-          "$peerId": {
-            ".read": "auth != null",
-            ".write": "auth != null && $peerId === auth.uid"
-          }
+        ".read": "auth != null && root.child('access').child($docId).child(auth.uid).exists()",
+        ".write": "auth != null && root.child('access').child($docId).child(auth.uid).exists()",
+        "updates": {
+          "$entry": { ".validate": "newData.hasChild('by')" }
         }
-      }
-    },
-    "signaling": {
-      "$docId": {
-        ".read": "auth != null",
-        ".write": "auth != null"
       }
     }
   }
 }
 ```
 
-## Best Practices
+Everyone with access to a document can read its signaling data, which includes collaborators' network addresses.
 
-### Optimize for Cost
+## Firebase cost
 
-```typescript
-// ✅ Good: Longer sync intervals for infrequent changes
-const adapter = await createFirebaseYWebrtcAdapter({
-  docId: 'my-doc',
-  firebaseDatabase: database,
-  syncIntervalMs: 60000, // 1 minute
-});
+Firebase bills Realtime Database by data downloaded and data stored; uploads are free. Firetap keeps downloads low:
 
-// ❌ Avoid: Very short intervals create unnecessary Firebase writes
-const adapter = await createFirebaseYWebrtcAdapter({
-  docId: 'my-doc',
-  firebaseDatabase: database,
-  syncIntervalMs: 1000, // 1 second - too frequent!
-});
-```
+- Live edits go between peers over WebRTC, not through Firebase.
+- Documents are stored gzip-compressed, and the edit log is regularly merged into a snapshot so loads stay small.
+- Someone opening a document others already have open gets the snapshot from them, and only downloads the latest edits.
+- Browsers cache the snapshot, so reopening an unchanged document downloads almost nothing.
+- Presence relies on Firebase's built-in disconnect detection instead of heartbeats, and WebRTC handshakes are compressed.
 
-### Monitor Performance
+Measured in Chromium against the Firebase emulator, for a document with 200KB of Yjs state (bytes Firebase sent to clients; production adds TLS overhead):
 
-```typescript
-adapter.on('connection-state-changed', ({ state }) => {
-  // Track connection quality
-  analytics.track('collaboration-connection', { state });
-});
+| Scenario | Before (0.x alpha) | Now |
+|---|---|---|
+| Open the document | 271KB | 65KB |
+| Reopen it in the same browser | 271KB | under 1KB |
+| Join while 7 others have it open | 281KB | 7KB |
+| 8 people edit together, each reloading twice | 6.8MB | 0.8MB |
 
-adapter.on('peer-connected', ({ peerId }) => {
-  // Monitor mesh network health
-  console.log('WebRTC peer connected:', peerId);
-});
-```
+To measure your own scenarios, see `bench/run.mjs` (`npm run bench:cost -w lib`).
 
-### Clean Up Properly
+## Limitations
 
-```typescript
-// Always destroy adapter when component unmounts
-useEffect(() => {
-  let adapter;
-  
-  createFirebaseYWebrtcAdapter(options).then(a => {
-    adapter = a;
-  });
-  
-  return () => {
-    adapter?.destroy();
-  };
-}, []);
-```
-
-## Performance Characteristics
-
-| Metric | Value | Notes |
-|--------|-------|-------|
-| Initial Load | ~50-100KB | Compressed document snapshot |
-| Peer Sync | 0 bytes via Firebase | Direct WebRTC connection |
-| Awareness Update | ~500 bytes | User cursor/selection data |
-| Heartbeat | ~100 bytes | Every 30 seconds |
-| Snapshot Save | ~50-100KB | Every 30 seconds (configurable) |
-| Memory Overhead | ~5-10MB | Per document, with GC |
-
-## Troubleshooting
-
-### High Bandwidth Costs?
-
-1. **Check sync interval**: Increase `syncIntervalMs` to reduce Firebase writes
-2. **Verify WebRTC**: Ensure peers are connecting via WebRTC (check console logs)
-3. **Monitor compression**: Check if compression is enabled and working
-4. **Review Rules**: Ensure security rules aren't causing denied operations (they still cost bandwidth!)
-
-### WebRTC Not Connecting?
-
-1. **Check STUN servers**: Default uses Google's public STUN servers
-2. **Corporate firewall**: May need to configure TURN servers
-3. **Browser support**: Ensure browser supports WebRTC and CompressionStream API
-
-### Performance Issues?
-
-1. **Enable garbage collection**: Ensure `ydoc.gc = true`
-2. **Limit awareness states**: Check `MAX_AWARENESS_STATES` constant
-3. **Reduce peer connections**: Lower `maxDirectPeers` if experiencing slowdown
-4. **Monitor memory**: Check for memory leaks in long-running sessions
+- **Offline edits are kept in memory only.** If a tab closes while it is offline and can't reach any peer, its unsaved edits are lost. `hasUnsavedChanges()` tells you when that could happen.
+- **WebRTC needs a network path.** Peers that can't connect directly need a TURN server (`iceServers`). Until then they still receive each other's edits through Firebase, with a few seconds' delay.
+- **One client per peer ID.** Every open document needs its own `peerId`; the default is a fresh random ID.
 
 ## License
 
-MIT License - see [LICENSE](./LICENSE) file for details
-
-## Contributing
-
-Contributions are welcome! Please read our contributing guidelines and submit pull requests to our [GitHub repository](https://github.com/mrivasperez/firetap).
-
-## Links
-
-- [GitHub Repository](https://github.com/mrivasperez/firetap)
-- [Issue Tracker](https://github.com/mrivasperez/firetap/issues)
-- [Firebase Realtime Database Pricing](https://firebase.google.com/pricing)
-- [Yjs Documentation](https://docs.yjs.dev/)
-- [TipTap Documentation](https://tiptap.dev/)
-
----
-
-Built with ❤️ by [Miguel Rivas Perez](https://github.com/mrivasperez)
+MIT

@@ -1,201 +1,67 @@
-import { type AdapterOptions } from "../adapter";
-
-// Validation Limits
-const MIN_DIRECT_PEERS = 1; // Minimum number of direct peer connections
-const MAX_DIRECT_PEERS_LIMIT = 20; // Maximum number of direct peer connections (validation)
-const MIN_SYNC_INTERVAL_MS = 1_000; // Minimum sync interval (1 second)
-
-export type DatabasePathsConfig = {
-  // Base path structure - can be 'flat' or 'nested'
-  structure: "flat" | "nested";
-
-  // For 'flat' structure: separate top-level paths
-  flat?: {
-    documents: string;
-    rooms: string;
-    snapshots: string;
-    signaling: string;
-  };
-
-  // For 'nested' structure: all under documents/{{docId}}
-  nested?: {
-    basePath: string; // e.g., '/documents'
-    subPaths: {
-      documents: string; // e.g., 'documents'
-      rooms: string; // e.g., 'rooms'
-      snapshots: string; // e.g., 'snapshots'
-      signaling: string; // e.g., 'signaling'
-    };
-  };
+type PathNames = {
+  rooms: string; // presence
+  signaling: string; // WebRTC offers/answers
+  updates: string; // the document's edit log
+  snapshots: string; // compacted document state
+  meta: string; // document metadata (snapshot generation, merge lease)
 };
 
-export type CollaborationConfig = {
-  // Document settings
-  docId: string;
+export type DatabasePathsConfig = {
+  structure: "flat" | "nested";
 
-  // Database paths configuration
-  databasePaths?: DatabasePathsConfig;
+  // Separate roots keyed by docId, e.g. rooms: '/rooms' -> '/rooms/{docId}'.
+  flat?: Partial<PathNames>;
 
-  // User settings
-  user: {
-    name: string;
+  // Everything under {basePath}/{docId}/; missing sub-paths default to their name.
+  nested?: {
+    basePath: string; // e.g., '/documents'
+    subPaths?: Partial<PathNames>;
   };
-
-  // Network settings
-  maxDirectPeers: number;
-  syncIntervalMs: number;
-  connectionTimeout: number;
-  heartbeatInterval: number;
-
-  // UI settings
-  placeholder: string;
-  showConnectionStatus: boolean;
-  showPeerCount: boolean;
-  autoReconnect: boolean;
-
-  // Debug settings
-  enableDebugLogs: boolean;
 };
 
 export const DEFAULT_DATABASE_PATHS: DatabasePathsConfig = {
   structure: "nested",
-  nested: {
-    basePath: "/documents",
-    subPaths: {
-      documents: "documents",
-      rooms: "rooms",
-      snapshots: "snapshots",
-      signaling: "signaling",
-    },
-  },
+  nested: { basePath: "/documents" },
 };
 
-export const DEFAULT_CONFIG: CollaborationConfig = {
-  docId: "default-doc",
-  databasePaths: DEFAULT_DATABASE_PATHS,
-  user: {
-    name: "Anonymous User",
-  },
-  maxDirectPeers: 4,
-  syncIntervalMs: 60000,
-  connectionTimeout: 40000, // Increased from 30s to 40s to match heartbeat optimization
-  heartbeatInterval: 90000, // Increased from 60s to 90s for cost optimization
-  placeholder: "Start typing to collaborate...",
-  showConnectionStatus: true,
-  showPeerCount: true,
-  autoReconnect: true,
-  enableDebugLogs: false,
-};
-
-export function createAdapterConfig(
-  config: Partial<CollaborationConfig>
-): Omit<AdapterOptions, "firebaseDatabase"> {
-  const mergedConfig = { ...DEFAULT_CONFIG, ...config };
-
-  return {
-    docId: mergedConfig.docId,
-    user: {
-      name: mergedConfig.user.name,
-    },
-    maxDirectPeers: mergedConfig.maxDirectPeers,
-    syncIntervalMs: mergedConfig.syncIntervalMs,
-    databasePaths: mergedConfig.databasePaths,
-  };
-}
-
-export function generateUserId(): string {
-  return `user-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
-}
-
-// Configuration creators (return partial configs - user must add firebaseDatabase)
-export function createSimpleConfig(
-  docId: string,
-  user: { name: string }
-): Omit<AdapterOptions, "firebaseDatabase"> {
-  return {
-    docId,
-    user,
-    maxDirectPeers: 6,
-    syncIntervalMs: 15000,
-    databasePaths: DEFAULT_DATABASE_PATHS,
-  };
-}
-
-export function createWorkspaceConfig(
-  docId: string,
-  workspaceId: string,
-  user: { name: string }
-): Omit<AdapterOptions, "firebaseDatabase"> {
-  return {
-    docId,
-    user,
-    maxDirectPeers: 6,
-    syncIntervalMs: 15000,
-    databasePaths: {
-      structure: "nested",
-      nested: {
-        basePath: `/${workspaceId}/documents`,
-        subPaths: {
-          documents: "documents",
-          rooms: "rooms",
-          snapshots: "snapshots",
-          signaling: "signaling",
-        },
-      },
-    },
-  };
-}
-
-export function validateConfig(config: Partial<CollaborationConfig>): string[] {
-  const errors: string[] = [];
-
-  if (config.docId && config.docId.trim().length === 0) {
-    errors.push("Document ID cannot be empty");
-  }
-
-  if (config.user?.name && config.user.name.trim().length === 0) {
-    errors.push("User name cannot be empty");
-  }
-
-  if (
-    config.maxDirectPeers &&
-    (config.maxDirectPeers < MIN_DIRECT_PEERS ||
-      config.maxDirectPeers > MAX_DIRECT_PEERS_LIMIT)
-  ) {
-    errors.push(
-      `Max direct peers must be between ${MIN_DIRECT_PEERS} and ${MAX_DIRECT_PEERS_LIMIT}`
-    );
-  }
-
-  if (config.syncIntervalMs && config.syncIntervalMs < MIN_SYNC_INTERVAL_MS) {
-    errors.push(`Sync interval must be at least ${MIN_SYNC_INTERVAL_MS}ms`);
-  }
-
-  return errors;
-}
+const PATH_NAMES: (keyof PathNames)[] = ["rooms", "signaling", "updates", "snapshots", "meta"];
 
 export type ConnectionState = "disconnected" | "connecting" | "connected";
 
-export function buildDatabasePaths(config: DatabasePathsConfig, docId: string) {
-  if (config.structure === "flat") {
-    if (!config.flat) throw new Error("Flat structure requires flat config");
-    return {
-      documents: config.flat.documents,
-      rooms: config.flat.rooms,
-      snapshots: config.flat.snapshots,
-      signaling: config.flat.signaling,
-    };
-  } else if (config.structure === "nested") {
-    if (!config.nested)
-      throw new Error("Nested structure requires nested config");
-    const base = `${config.nested.basePath}/${docId}`;
-    return {
-      documents: `${base}/${config.nested.subPaths.documents}`,
-      rooms: `${base}/${config.nested.subPaths.rooms}`,
-      snapshots: `${base}/${config.nested.subPaths.snapshots}`,
-      signaling: `${base}/${config.nested.subPaths.signaling}`,
-    };
-  } else {
-    throw new Error(`Unknown database structure: ${config.structure}`);
+// Characters Firebase rejects in keys, plus "/" which would escape the document.
+const INVALID_DOC_ID = /[.#$\[\]/]/;
+
+export function validateDocId(docId: string): void {
+  if (typeof docId !== "string" || docId.trim().length === 0) {
+    throw new Error("docId must be a non-empty string");
   }
+  if (INVALID_DOC_ID.test(docId)) {
+    throw new Error(
+      `docId "${docId}" contains a character Firebase does not allow in keys (. # $ [ ] /)`
+    );
+  }
+}
+
+export function buildDatabasePaths(
+  config: DatabasePathsConfig | undefined,
+  docId: string
+): PathNames {
+  validateDocId(docId);
+  const resolved = config ?? DEFAULT_DATABASE_PATHS;
+  const paths = {} as PathNames;
+  if (resolved.structure === "flat") {
+    for (const name of PATH_NAMES) {
+      paths[name] = `${resolved.flat?.[name] ?? `/${name}`}/${docId}`;
+    }
+  } else if (resolved.structure === "nested") {
+    if (!resolved.nested)
+      throw new Error("Nested structure requires nested config");
+    const base = `${resolved.nested.basePath}/${docId}`;
+    for (const name of PATH_NAMES) {
+      paths[name] = `${base}/${resolved.nested.subPaths?.[name] ?? name}`;
+    }
+  } else {
+    throw new Error(`Unknown database structure: ${resolved.structure}`);
+  }
+  return paths;
 }
