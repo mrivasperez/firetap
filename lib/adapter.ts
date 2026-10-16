@@ -242,7 +242,7 @@ export async function createFirebaseYWebrtcAdapter(
   peerManager.setPersistHandler(forcePersistSync);
 
   // 9) Initialize peer connections
-  await peerManager.initialize();
+  await peerManager.start();
 
   // 10) Set up memory monitoring
   const memoryMonitorTimer = setInterval(() => {

@@ -49,5 +49,7 @@ export type SignalData = {
   sdp?: RTCSessionDescriptionInit;
   from: string;
   to: string;
+  // Lets the initiator ignore a late answer to an offer it has replaced.
+  connectionId: string;
   timestamp: number;
 };

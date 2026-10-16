@@ -56,3 +56,29 @@ export async function closeClients(): Promise<void> {
 export function uniqueBasePath(label: string): string {
   return `/t-${label}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
 }
+
+export async function waitFor<T>(
+  condition: () => T | Promise<T>,
+  { timeout = 10_000, interval = 50, message = 'condition' } = {}
+): Promise<T> {
+  const deadline = Date.now() + timeout
+  let last: T
+  do {
+    last = await condition()
+    if (last) return last
+    await new Promise((r) => setTimeout(r, interval))
+  } while (Date.now() < deadline)
+  throw new Error(`Timed out waiting for ${message}`)
+}
+
+export const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms))
+
+export function nestedPaths(basePath: string) {
+  return {
+    structure: 'nested' as const,
+    nested: {
+      basePath,
+      subPaths: { documents: 'documents', rooms: 'rooms', snapshots: 'snapshots', signaling: 'signaling' },
+    },
+  }
+}

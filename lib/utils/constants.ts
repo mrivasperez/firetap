@@ -2,12 +2,17 @@ export const DEFAULT_MAX_DIRECT_PEERS = 20;
 export const PEER_PRESENCE_TIMEOUT_MS = 600_000;
 export const PEER_ID_DISPLAY_LENGTH = 6;
 
-export const IDLE_PEER_TIMEOUT_MS = 300_000;
 export const MAX_AWARENESS_STATES = 50;
+
+export const CONNECT_TIMEOUT_MS = 30_000;
+export const DISCONNECT_GRACE_MS = 5_000;
+export const RETRY_BASE_MS = 2_000;
+export const RETRY_MAX_MS = 60_000;
+export const ICE_GATHERING_MAX_MS = 3_000;
+export const ICE_SETTLE_MS = 300;
 
 export const CLEANUP_INTERVAL_MS = 300_000;
 export const HEARTBEAT_INTERVAL_MS = 300_000;
-export const STALE_CONNECTION_TIMEOUT_MS = 600_000;
 export const MEMORY_CHECK_INTERVAL_MS = 300_000;
 export const MIN_VISIBILITY_UPDATE_INTERVAL = 120_000;
 

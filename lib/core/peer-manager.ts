@@ -1,36 +1,53 @@
 import * as Y from "yjs";
 import { Awareness } from "y-protocols/awareness";
-import {
-  stopAnnouncingPresence,
-  cleanupStalePeers,
-} from "../firebase/presence";
+import { cleanupStalePeers } from "../firebase/presence";
 import type { Database } from "firebase/database";
-import { ref, set, remove, push, off, onChildAdded, onChildRemoved } from "firebase/database";
+import {
+  ref,
+  set,
+  remove,
+  push,
+  onChildAdded,
+  onChildRemoved,
+  onDisconnect,
+} from "firebase/database";
 import {
   applyAwarenessUpdate,
   removeAwarenessStates,
 } from "y-protocols/awareness";
 
-import {
-  type DatabasePathsConfig,
-  buildDatabasePaths,
-} from "../utils/config";
+import { type DatabasePathsConfig, buildDatabasePaths } from "../utils/config";
 import { compressData, decompressData } from "../utils/compression";
 import {
   PEER_PRESENCE_TIMEOUT_MS,
   PEER_ID_DISPLAY_LENGTH,
-  IDLE_PEER_TIMEOUT_MS,
   MAX_AWARENESS_STATES,
   CLEANUP_INTERVAL_MS,
   HEARTBEAT_INTERVAL_MS,
-  STALE_CONNECTION_TIMEOUT_MS,
   MIN_VISIBILITY_UPDATE_INTERVAL,
   STUN_SERVERS,
   MAX_CHUNK_SIZE,
   CHUNK_HEADER_SIZE,
+  CONNECT_TIMEOUT_MS,
+  DISCONNECT_GRACE_MS,
+  RETRY_BASE_MS,
+  RETRY_MAX_MS,
+  ICE_GATHERING_MAX_MS,
+  ICE_SETTLE_MS,
 } from "../utils/constants";
 import type { AdapterEvents, SignalData } from "./types";
 import { defaultLogger, type Logger } from "../utils/logger";
+
+type Timer = ReturnType<typeof setTimeout>;
+
+type PeerConnectionEntry = {
+  pc: RTCPeerConnection;
+  connectionId: string;
+  initiator: boolean;
+  wasConnected: boolean;
+  connectTimer: Timer | null;
+  disconnectTimer: Timer | null;
+};
 
 export class SimplePeerManager {
   private docId: string;
@@ -39,21 +56,62 @@ export class SimplePeerManager {
   private awareness: Awareness;
   private databasePaths: DatabasePathsConfig | undefined;
   private rtdb: Database;
+  private maxPeers: number;
+  private logger: Logger;
+
   private eventListeners: Map<
     keyof AdapterEvents,
     Set<(data: AdapterEvents[keyof AdapterEvents]) => void>
   > = new Map();
-  private cleanupInterval: ReturnType<typeof setInterval> | null = null;
-  private heartbeatInterval: ReturnType<typeof setInterval> | null = null;
-  private beforeUnloadHandler: (() => void) | null = null;
-  private visibilityChangeHandler: (() => void) | null = null;
-  private pendingPresenceUpdate: Promise<void> | null = null; // Track pending presence updates to prevent race conditions
-  private connectionTimestamps = new Map<string, number>();
-  private isDestroyed = false;
-  private isTabVisible = true;
-  private logger: Logger;
 
-  // Event system methods
+  // Changes on every start/stop, so callbacks from an earlier run can bail out.
+  private running = false;
+  private destroyed = false;
+  private runId = 0;
+  private connectionStatus: "connecting" | "connected" | "disconnected" =
+    "connecting";
+
+  private unsubscribers: Array<() => void> = [];
+  private intervals: Array<ReturnType<typeof setInterval>> = [];
+  private retryTimers = new Map<string, Timer>();
+  private retryAttempts = new Map<string, number>();
+
+  private presentPeers = new Set<string>();
+
+  // WebRTC peer connections
+  private peers = new Map<string, PeerConnectionEntry>();
+  private dataChannels = new Map<string, RTCDataChannel>();
+
+  // Chunked message reassembly buffers
+  private chunkBuffers = new Map<
+    string,
+    Map<number, { chunk: number[]; totalChunks: number }>
+  >();
+
+  private pendingPresenceUpdate: Promise<void> | null = null;
+  private lastVisibilityUpdate = 0;
+  private persistDocumentSync: (() => void) | null = null;
+
+  constructor(
+    docId: string,
+    peerId: string,
+    ydoc: Y.Doc,
+    awareness: Awareness,
+    rtdb: Database,
+    databasePaths: DatabasePathsConfig | undefined,
+    maxDirectPeers: number = 20,
+    logger: Logger = defaultLogger
+  ) {
+    this.docId = docId;
+    this.peerId = peerId;
+    this.ydoc = ydoc;
+    this.awareness = awareness;
+    this.rtdb = rtdb;
+    this.databasePaths = databasePaths;
+    this.maxPeers = maxDirectPeers;
+    this.logger = logger;
+  }
+
   emit<K extends keyof AdapterEvents>(event: K, data: AdapterEvents[K]): void {
     const listeners = this.eventListeners.get(event);
     if (listeners) {
@@ -77,23 +135,118 @@ export class SimplePeerManager {
     event: K,
     callback: (data: AdapterEvents[K]) => void
   ): void {
-    const listeners = this.eventListeners.get(event);
-    if (listeners) {
-      listeners.delete(
-        callback as (data: AdapterEvents[keyof AdapterEvents]) => void
-      );
+    this.eventListeners
+      .get(event)
+      ?.delete(callback as (data: AdapterEvents[keyof AdapterEvents]) => void);
+  }
+
+  private getPaths() {
+    return buildDatabasePaths(this.databasePaths, this.docId);
+  }
+
+  async start(): Promise<void> {
+    if (this.destroyed) {
+      throw new Error("Cannot start a destroyed peer manager");
     }
+    if (this.running) return;
+    this.running = true;
+    const runId = ++this.runId;
+    const paths = this.getPaths();
+
+    const signalingRef = ref(this.rtdb, `${paths.signaling}/${this.peerId}`);
+    this.unsubscribers.push(
+      onChildAdded(signalingRef, (snapshot) => {
+        if (runId !== this.runId) return;
+        this.handleSignalData(snapshot.val() as SignalData);
+        remove(snapshot.ref).catch((error) =>
+          this.logger.warn(`Failed to remove signal ${snapshot.key}:`, error)
+        );
+      })
+    );
+
+    const peersRef = ref(this.rtdb, `${paths.rooms}/peers`);
+    this.unsubscribers.push(
+      onChildAdded(peersRef, (snapshot) => {
+        if (runId !== this.runId) return;
+        const otherPeerId = snapshot.key!;
+        if (otherPeerId === this.peerId) return;
+        const peerData = snapshot.val();
+        if (
+          !peerData?.lastSeen ||
+          Date.now() - peerData.lastSeen >= PEER_PRESENCE_TIMEOUT_MS
+        ) {
+          return;
+        }
+        this.presentPeers.add(otherPeerId);
+        if (this.shouldInitiate(otherPeerId)) {
+          this.logger.debug(`New peer detected: ${otherPeerId}, initiating`);
+          this.createPeerConnection(otherPeerId, true);
+        }
+      })
+    );
+    this.unsubscribers.push(
+      onChildRemoved(peersRef, (snapshot) => {
+        if (runId !== this.runId) return;
+        const otherPeerId = snapshot.key!;
+        if (otherPeerId === this.peerId) return;
+        this.presentPeers.delete(otherPeerId);
+        this.cancelRetry(otherPeerId);
+        if (this.peers.has(otherPeerId)) {
+          this.logger.debug(`Peer ${otherPeerId} left, closing connection`);
+          this.cleanupPeerConnection(otherPeerId);
+        }
+      })
+    );
+
+    this.intervals.push(
+      setInterval(() => this.periodicCleanup(runId), CLEANUP_INTERVAL_MS),
+      setInterval(() => {
+        this.updatePresence(runId).catch(() => {});
+      }, HEARTBEAT_INTERVAL_MS)
+    );
+    this.updatePresence(runId).catch(() => {});
+
+    this.addPageListeners();
+    this.connectionStatus = "connected";
+  }
+
+  stop(): void {
+    if (!this.running) return;
+    this.running = false;
+    this.runId++;
+
+    this.removePageListeners();
+    this.unsubscribers.splice(0).forEach((unsubscribe) => unsubscribe());
+    this.intervals.splice(0).forEach((interval) => clearInterval(interval));
+    this.retryTimers.forEach((timer) => clearTimeout(timer));
+    this.retryTimers.clear();
+    this.retryAttempts.clear();
+
+    for (const peerId of Array.from(this.peers.keys())) {
+      this.cleanupPeerConnection(peerId);
+    }
+    this.presentPeers.clear();
+    this.chunkBuffers.clear();
+
+    const peerRef = ref(this.rtdb, `${this.getPaths().rooms}/peers/${this.peerId}`);
+    remove(peerRef).catch((error) =>
+      this.logger.warn("Failed to remove own presence:", error)
+    );
+
+    this.connectionStatus = "disconnected";
+  }
+
+  destroy(): void {
+    this.stop();
+    this.destroyed = true;
   }
 
   async reconnect(): Promise<void> {
     this.connectionStatus = "connecting";
     this.emit("connection-state-changed", { state: "connecting" });
     try {
-      // Clean up existing connections
-      this.destroy();
-      // Re-initialize
-      await this.initialize();
-      this.connectionStatus = "connected";
+      this.stop();
+      await this.start();
       this.emit("connection-state-changed", { state: "connected" });
     } catch (error) {
       this.connectionStatus = "disconnected";
@@ -103,307 +256,376 @@ export class SimplePeerManager {
     }
   }
 
-  // WebRTC peer connections
-  private peers = new Map<string, RTCPeerConnection>();
-  private dataChannels = new Map<string, RTCDataChannel>();
-  
-  // Delta-only sync optimization: track peer sync states
-  private peerSyncState = new Map<string, Uint8Array>();
-
-  private signalingRef: ReturnType<typeof ref> | null = null;
-  private connectionStatus: "connecting" | "connected" | "disconnected" =
-    "connecting";
-  private peersRef: ReturnType<typeof ref> | null = null;
-  
-  // Firebase listener unsubscribe functions
-  private signalingListenerUnsubscribe: (() => void) | null = null;
-  private peersAddedListenerUnsubscribe: (() => void) | null = null;
-  private peersRemovedListenerUnsubscribe: (() => void) | null = null;
-  
-  private lastCleanup = Date.now();
-
-  private maxPeers: number; // Prevent too many connections
-  
-  // Chunked message reassembly buffers
-  private chunkBuffers = new Map<string, Map<number, { chunk: number[]; totalChunks: number }>>();
-
-  constructor(
-    docId: string,
-    peerId: string,
-    ydoc: Y.Doc,
-    awareness: Awareness,
-    rtdb: Database,
-    databasePaths: DatabasePathsConfig | undefined,
-    maxDirectPeers: number = 20,
-    logger: Logger = defaultLogger
-  ) {
-    this.logger = logger;
-    this.docId = docId;
-    this.peerId = peerId;
-    this.ydoc = ydoc;
-    this.awareness = awareness;
-    this.rtdb = rtdb;
-    this.databasePaths = databasePaths;
-    this.maxPeers = maxDirectPeers;
+  setPersistHandler(handler: () => void): void {
+    this.persistDocumentSync = handler;
   }
 
-  private getPaths() {
-    return buildDatabasePaths(this.databasePaths, this.docId);
-  }
-
-  async initialize(): Promise<void> {
-    if (this.isDestroyed) {
-      throw new Error("Cannot initialize destroyed peer manager");
-    }
-
-    // Set up signaling listener - OPTIMIZED: Use onChildAdded for granular updates
-    // This reduces bandwidth by 40-60% compared to onValue() which downloads entire signaling node
-    this.signalingRef = ref(
-      this.rtdb,
-      `${this.getPaths().signaling}/${this.peerId}`
-    );
-    this.logger.debug(
-      `Setting up granular signaling listener at: ${this.getPaths().signaling}/${
-        this.peerId
-      }`
-    );
-    
-    // Listen only for NEW signals (not entire collection)
-    this.signalingListenerUnsubscribe = onChildAdded(this.signalingRef, (snapshot) => {
-      if (this.isDestroyed) return;
-      
-      const signal = snapshot.val() as SignalData;
-      this.logger.debug(`Received signal: ${signal.type} from ${signal.from}`);
-      
-      // Process the signal
-      this.handleSignalData(signal);
-      
-      // Immediately clean up this specific signal
-      remove(snapshot.ref).catch((error) => {
-        this.logger.warn(`Failed to remove signal ${snapshot.key}:`, error);
-      });
+  getPeerCount(): number {
+    let count = 0;
+    this.peers.forEach(({ pc }) => {
+      if (pc.connectionState === "connected") count++;
     });
+    return count;
+  }
 
-    // Listen for other peers joining/leaving - OPTIMIZED: Use child listeners for granular updates
-    // This reduces bandwidth by 40-60% compared to onValue() which downloads entire peers collection
-    this.peersRef = ref(this.rtdb, `${this.getPaths().rooms}/peers`);
-    
-    // Listen for NEW peers joining
-    this.peersAddedListenerUnsubscribe = onChildAdded(this.peersRef, (snapshot) => {
-      if (this.isDestroyed) return;
-      
-      const otherPeerId = snapshot.key!;
-      const peerData = snapshot.val();
-      
-      // Skip our own peer entry
-      if (otherPeerId === this.peerId) return;
-      
-      // Skip if connection already exists
-      if (this.peers.has(otherPeerId)) return;
-      
-      const now = Date.now();
-      // Check if peer is not stale
+  getConnectionStatus(): "connecting" | "connected" | "disconnected" {
+    return this.connectionStatus;
+  }
+
+  private onVisibilityChange = () => {
+    if (!this.running || typeof document === "undefined" || document.hidden) {
+      return;
+    }
+    const now = Date.now();
+    if (now - this.lastVisibilityUpdate > MIN_VISIBILITY_UPDATE_INTERVAL) {
+      this.lastVisibilityUpdate = now;
+      this.updatePresence(this.runId).catch(() => {});
+    }
+    this.connectMissingPeers();
+  };
+
+  private onPageHide = () => {
+    if (!this.running) return;
+    try {
+      this.persistDocumentSync?.();
+    } catch (error) {
+      this.logger.warn("Error persisting document on unload:", error);
+    }
+    // Best effort; onDisconnect covers it if this write never leaves.
+    const peerRef = ref(this.rtdb, `${this.getPaths().rooms}/peers/${this.peerId}`);
+    remove(peerRef).catch(() => {});
+  };
+
+  private onOnline = () => {
+    if (this.running) this.connectMissingPeers();
+  };
+
+  private addPageListeners(): void {
+    if (typeof document !== "undefined") {
+      document.addEventListener("visibilitychange", this.onVisibilityChange);
+    }
+    if (typeof window !== "undefined") {
+      window.addEventListener("beforeunload", this.onPageHide);
+      window.addEventListener("pagehide", this.onPageHide);
+      window.addEventListener("online", this.onOnline);
+    }
+  }
+
+  private removePageListeners(): void {
+    if (typeof document !== "undefined") {
+      document.removeEventListener("visibilitychange", this.onVisibilityChange);
+    }
+    if (typeof window !== "undefined") {
+      window.removeEventListener("beforeunload", this.onPageHide);
+      window.removeEventListener("pagehide", this.onPageHide);
+      window.removeEventListener("online", this.onOnline);
+    }
+  }
+
+  private async updatePresence(runId: number): Promise<void> {
+    if (runId !== this.runId) return;
+
+    if (this.pendingPresenceUpdate) {
+      await this.pendingPresenceUpdate.catch(() => {});
+    }
+    if (runId !== this.runId) return;
+
+    this.pendingPresenceUpdate = (async () => {
+      try {
+        const peerRef = ref(
+          this.rtdb,
+          `${this.getPaths().rooms}/peers/${this.peerId}`
+        );
+        await onDisconnect(peerRef).remove();
+        if (runId !== this.runId) return;
+        await set(peerRef, { id: this.peerId, lastSeen: Date.now() });
+      } catch (error) {
+        this.logger.warn("Failed to update heartbeat:", error);
+        throw error;
+      } finally {
+        this.pendingPresenceUpdate = null;
+      }
+    })();
+    return this.pendingPresenceUpdate;
+  }
+
+  private periodicCleanup(runId: number): void {
+    if (runId !== this.runId) return;
+    cleanupStalePeers(this.rtdb, this.docId, this.databasePaths, this.logger)
+      .catch((error) =>
+        this.logger.warn("Failed to cleanup stale peers from Firebase:", error)
+      );
+    this.cleanupAwarenessStates();
+  }
+
+  // The smaller id initiates, so each pair negotiates once.
+  private shouldInitiate(otherPeerId: string): boolean {
+    return this.peerId < otherPeerId;
+  }
+
+  private connectMissingPeers(): void {
+    this.presentPeers.forEach((otherPeerId) => {
       if (
-        peerData.lastSeen &&
-        now - peerData.lastSeen < PEER_PRESENCE_TIMEOUT_MS
+        this.shouldInitiate(otherPeerId) &&
+        !this.peers.has(otherPeerId) &&
+        !this.retryTimers.has(otherPeerId)
       ) {
-        // Only create connection if we should be the initiator (deterministic)
-        const shouldInitiate = this.peerId < otherPeerId;
-        if (shouldInitiate) {
-          this.logger.debug(`New peer detected: ${otherPeerId}, initiating connection`);
+        this.createPeerConnection(otherPeerId, true);
+      }
+    });
+  }
+
+  private scheduleRetry(otherPeerId: string): void {
+    if (
+      !this.running ||
+      !this.shouldInitiate(otherPeerId) ||
+      !this.presentPeers.has(otherPeerId) ||
+      this.retryTimers.has(otherPeerId)
+    ) {
+      return;
+    }
+    const attempt = (this.retryAttempts.get(otherPeerId) ?? 0) + 1;
+    this.retryAttempts.set(otherPeerId, attempt);
+    const backoff = Math.min(RETRY_MAX_MS, RETRY_BASE_MS * 2 ** (attempt - 1));
+    const delay = backoff / 2 + Math.random() * (backoff / 2);
+    const runId = this.runId;
+    this.logger.debug(
+      `Retrying connection to ${otherPeerId} in ${Math.round(delay)}ms (attempt ${attempt})`
+    );
+    this.retryTimers.set(
+      otherPeerId,
+      setTimeout(() => {
+        this.retryTimers.delete(otherPeerId);
+        if (
+          runId === this.runId &&
+          this.presentPeers.has(otherPeerId) &&
+          !this.peers.has(otherPeerId)
+        ) {
           this.createPeerConnection(otherPeerId, true);
         }
-      }
-    });
-    
-    // Listen for peers leaving
-    this.peersRemovedListenerUnsubscribe = onChildRemoved(this.peersRef, (snapshot) => {
-      if (this.isDestroyed) return;
-      
-      const peerId = snapshot.key!;
-      if (peerId !== this.peerId && this.peers.has(peerId)) {
-        this.logger.debug(
-          `Peer ${peerId} removed from presence, cleaning up connection`
-        );
-        this.cleanupPeerConnection(peerId);
-      }
-    });
-
-    // Set up periodic cleanup
-    this.startPeriodicCleanup();
-
-    // Set up heartbeat to maintain presence
-    this.startHeartbeat();
-
-    // Set up beforeunload handler
-    this.setupBeforeUnloadHandler();
-
-    this.connectionStatus = "connected";
+      }, delay)
+    );
   }
 
-  private createPeerConnection(otherPeerId: string, initiator: boolean): void {
-    // Check if peer connection already exists
-    if (this.peers.has(otherPeerId)) {
-      return;
-    }
+  private cancelRetry(otherPeerId: string): void {
+    const timer = this.retryTimers.get(otherPeerId);
+    if (timer) clearTimeout(timer);
+    this.retryTimers.delete(otherPeerId);
+    this.retryAttempts.delete(otherPeerId);
+  }
 
-    // Check if we're destroyed
-    if (this.isDestroyed) {
-      return;
-    }
+  private createPeerConnection(
+    otherPeerId: string,
+    initiator: boolean,
+    connectionId: string = crypto.randomUUID()
+  ): PeerConnectionEntry | null {
+    if (!this.running || this.peers.has(otherPeerId)) return null;
 
-    // Prevent too many connections for memory optimization
     if (this.peers.size >= this.maxPeers) {
       this.logger.warn(
         `Maximum peer connections reached (${this.maxPeers}), rejecting new connection to ${otherPeerId}`
       );
-      return;
+      return null;
     }
 
-    // Create RTCPeerConnection with STUN servers
-    const peerConnection = new RTCPeerConnection({
-      iceServers: STUN_SERVERS,
-    });
-
-    // Store the peer connection
-    this.peers.set(otherPeerId, peerConnection);
-
-    // Handle ICE candidates - using non-trickle ICE for cost optimization
-    // All candidates will be bundled in the SDP, so we don't need to send them separately
-    peerConnection.onicecandidate = (event) => {
-      if (event.candidate) {
-        // With non-trickle ICE, candidates are automatically included in the SDP
-        // No need to send them separately - this saves Firebase write costs
-        this.logger.debug(
-          `ICE candidate generated for ${otherPeerId} (will be bundled in SDP)`
-        );
-      } else {
-        // null candidate means ICE gathering is complete
-        this.logger.debug(`ICE gathering complete for ${otherPeerId}`);
-      }
+    const pc = new RTCPeerConnection({ iceServers: STUN_SERVERS });
+    const entry: PeerConnectionEntry = {
+      pc,
+      connectionId,
+      initiator,
+      wasConnected: false,
+      connectTimer: null,
+      disconnectTimer: null,
     };
+    this.peers.set(otherPeerId, entry);
+    const isCurrent = () => this.peers.get(otherPeerId) === entry;
 
-    // Handle connection state changes
-    peerConnection.onconnectionstatechange = () => {
-      const state = peerConnection.connectionState;
+    entry.connectTimer = setTimeout(() => {
+      if (isCurrent() && pc.connectionState !== "connected") {
+        this.logger.debug(`Connection to ${otherPeerId} timed out`);
+        this.cleanupPeerConnection(otherPeerId, { retry: true });
+      }
+    }, CONNECT_TIMEOUT_MS);
+
+    pc.onconnectionstatechange = () => {
+      if (!isCurrent()) return;
+      const state = pc.connectionState;
       this.logger.debug(`Peer ${otherPeerId} connection state: ${state}`);
 
       if (state === "connected") {
-        this.logger.debug(`Peer ${otherPeerId} connected`);
-        this.connectionTimestamps.set(otherPeerId, Date.now());
-        this.emit("peer-joined", {
-          peerId: otherPeerId,
-          user: {
-            id: otherPeerId,
-            name: `User-${otherPeerId.slice(0, PEER_ID_DISPLAY_LENGTH)}`,
-            connectedAt: Date.now(),
-          },
-        });
-        
-        // Initial sync now happens in dataChannel.onopen to ensure channel is ready
-      } else if (
-        state === "failed" ||
-        state === "disconnected" ||
-        state === "closed"
-      ) {
-        this.logger.debug(`Peer ${otherPeerId} ${state}`);
-        this.cleanupPeerConnection(otherPeerId);
+        if (entry.connectTimer) clearTimeout(entry.connectTimer);
+        if (entry.disconnectTimer) clearTimeout(entry.disconnectTimer);
+        entry.connectTimer = entry.disconnectTimer = null;
+        this.retryAttempts.delete(otherPeerId);
+        if (!entry.wasConnected) {
+          entry.wasConnected = true;
+          this.emit("peer-joined", {
+            peerId: otherPeerId,
+            user: {
+              id: otherPeerId,
+              name: `User-${otherPeerId.slice(0, PEER_ID_DISPLAY_LENGTH)}`,
+              connectedAt: Date.now(),
+            },
+          });
+        }
+      } else if (state === "disconnected") {
+        // Often a brief network blip; give it a moment to recover.
+        if (!entry.disconnectTimer) {
+          entry.disconnectTimer = setTimeout(() => {
+            if (isCurrent() && pc.connectionState !== "connected") {
+              this.cleanupPeerConnection(otherPeerId, { retry: true });
+            }
+          }, DISCONNECT_GRACE_MS);
+        }
+      } else if (state === "failed" || state === "closed") {
+        this.cleanupPeerConnection(otherPeerId, { retry: true });
       }
     };
 
-    // Handle data channel
     if (initiator) {
-      // Create data channel as initiator
-      this.logger.debug(
-        `Creating data channel and offer for peer ${otherPeerId} (I am initiator)`
-      );
-      const dataChannel = peerConnection.createDataChannel("data");
+      const dataChannel = pc.createDataChannel("data");
       this.dataChannels.set(otherPeerId, dataChannel);
       this.setupDataChannel(otherPeerId, dataChannel);
 
-      // Create offer and wait for ICE gathering to complete (non-trickle ICE)
-      peerConnection
-        .createOffer()
-        .then((offer) => {
-          this.logger.debug(
-            `Created offer for ${otherPeerId}, setting local description`
-          );
-          return peerConnection.setLocalDescription(offer);
-        })
+      pc.createOffer()
+        .then((offer) => pc.setLocalDescription(offer))
+        .then(() => waitForIceGathering(pc))
         .then(() => {
-          // Wait for ICE gathering to complete before sending
-          return new Promise<void>((resolve) => {
-            if (peerConnection.iceGatheringState === "complete") {
-              resolve();
-            } else {
-              const checkGathering = () => {
-                if (peerConnection.iceGatheringState === "complete") {
-                  peerConnection.removeEventListener(
-                    "icegatheringstatechange",
-                    checkGathering
-                  );
-                  resolve();
-                }
-              };
-              peerConnection.addEventListener(
-                "icegatheringstatechange",
-                checkGathering
-              );
-            }
-          });
-        })
-        .then(() => {
-          if (peerConnection.localDescription) {
-            this.logger.debug(
-              `ICE gathering complete, sending offer to ${otherPeerId}`
-            );
-            return this.sendOffer(otherPeerId, peerConnection.localDescription);
+          if (isCurrent() && pc.localDescription) {
+            return this.sendSignal(otherPeerId, "offer", pc.localDescription, connectionId);
           }
         })
-        .then(() => {
-          this.logger.debug(`Offer sent successfully to ${otherPeerId}`);
-        })
         .catch((error) => {
-          this.logger.error(`Error creating offer for ${otherPeerId}:`, error);
-          this.cleanupPeerConnection(otherPeerId);
+          this.logger.warn(`Error creating offer for ${otherPeerId}:`, error);
+          if (isCurrent()) this.cleanupPeerConnection(otherPeerId, { retry: true });
         });
     } else {
-      this.logger.debug(
-        `Waiting for offer from peer ${otherPeerId} (they are initiator)`
-      );
-      // Handle incoming data channel as receiver
-      peerConnection.ondatachannel = (event) => {
-        this.logger.debug(`Received data channel from ${otherPeerId}`);
-        const dataChannel = event.channel;
-        this.dataChannels.set(otherPeerId, dataChannel);
-        this.setupDataChannel(otherPeerId, dataChannel);
+      pc.ondatachannel = (event) => {
+        if (!isCurrent()) return;
+        this.dataChannels.set(otherPeerId, event.channel);
+        this.setupDataChannel(otherPeerId, event.channel);
       };
+    }
+
+    return entry;
+  }
+
+  private cleanupPeerConnection(
+    otherPeerId: string,
+    { retry = false }: { retry?: boolean } = {}
+  ): void {
+    const entry = this.peers.get(otherPeerId);
+    if (entry) {
+      this.peers.delete(otherPeerId);
+      if (entry.connectTimer) clearTimeout(entry.connectTimer);
+      if (entry.disconnectTimer) clearTimeout(entry.disconnectTimer);
+      try {
+        entry.pc.close();
+      } catch (e) {
+        this.logger.warn(`Error closing peer ${otherPeerId}:`, e);
+      }
+    }
+
+    const dataChannel = this.dataChannels.get(otherPeerId);
+    if (dataChannel) {
+      this.dataChannels.delete(otherPeerId);
+      try {
+        dataChannel.close();
+      } catch (e) {
+        this.logger.warn(`Error closing data channel for ${otherPeerId}:`, e);
+      }
+    }
+
+    this.chunkBuffers.delete(otherPeerId);
+
+    if (entry?.wasConnected) {
+      this.emit("peer-left", { peerId: otherPeerId });
+    }
+    if (retry) this.scheduleRetry(otherPeerId);
+  }
+
+  private async sendSignal(
+    targetPeerId: string,
+    type: SignalData["type"],
+    description: RTCSessionDescriptionInit,
+    connectionId: string
+  ): Promise<void> {
+    const signalData: SignalData = {
+      type,
+      sdp: { type: description.type!, sdp: description.sdp! },
+      from: this.peerId,
+      to: targetPeerId,
+      connectionId,
+      timestamp: Date.now(),
+    };
+    const messageRef = push(
+      ref(this.rtdb, `${this.getPaths().signaling}/${targetPeerId}`)
+    );
+    await set(messageRef, signalData);
+    this.logger.debug(`Sent ${type} to ${targetPeerId}`);
+  }
+
+  private handleSignalData(signalData: SignalData): void {
+    const { from, type, connectionId } = signalData;
+    if (!this.running || !from || !signalData.sdp) return;
+
+    if (type === "offer") {
+      // A new offer means the initiator started over, e.g. after a failure.
+      if (this.peers.has(from)) {
+        this.logger.debug(`New offer from ${from}, replacing existing connection`);
+        this.cleanupPeerConnection(from);
+      }
+      const entry = this.createPeerConnection(from, false, connectionId);
+      if (!entry) return;
+      const { pc } = entry;
+      const isCurrent = () => this.peers.get(from) === entry;
+
+      pc.setRemoteDescription(new RTCSessionDescription(signalData.sdp))
+        .then(() => pc.createAnswer())
+        .then((answer) => pc.setLocalDescription(answer))
+        .then(() => waitForIceGathering(pc))
+        .then(() => {
+          if (isCurrent() && pc.localDescription) {
+            return this.sendSignal(from, "answer", pc.localDescription, entry.connectionId);
+          }
+        })
+        .catch((error) => {
+          this.logger.warn(`Error handling offer from ${from}:`, error);
+          if (isCurrent()) this.cleanupPeerConnection(from);
+        });
+      return;
+    }
+
+    if (type === "answer") {
+      const entry = this.peers.get(from);
+      if (!entry || !entry.initiator || entry.connectionId !== connectionId) {
+        this.logger.debug(`Ignoring stale answer from ${from}`);
+        return;
+      }
+      entry.pc
+        .setRemoteDescription(new RTCSessionDescription(signalData.sdp))
+        .catch((error) => {
+          this.logger.warn(`Error handling answer from ${from}:`, error);
+          if (this.peers.get(from) === entry) {
+            this.cleanupPeerConnection(from, { retry: true });
+          }
+        });
     }
   }
 
   private setupDataChannel(peerId: string, dataChannel: RTCDataChannel): void {
     dataChannel.onopen = () => {
       this.logger.debug(`Data channel opened for peer ${peerId}`);
-      
-      // CRITICAL: Send initial document state when data channel opens
-      // This ensures new peers receive the full document
+
       try {
-        const lastState = this.peerSyncState.get(peerId);
-        const update = lastState
-          ? Y.encodeStateAsUpdate(this.ydoc, lastState) // Delta only
-          : Y.encodeStateAsUpdate(this.ydoc);            // Full state for new peer
-        
-        // Only send if there's actual content to sync
+        const update = Y.encodeStateAsUpdate(this.ydoc);
         if (update.length > 0) {
-          const message = JSON.stringify({ 
-            type: "sync", 
-            update: Array.from(update) 
-          });
-          dataChannel.send(message);
-          this.logger.debug(`Sent initial sync to peer ${peerId} (${update.length} bytes)`);
-          
-          // Track current state for next delta sync
-          this.peerSyncState.set(peerId, Y.encodeStateVector(this.ydoc));
+          dataChannel.send(
+            JSON.stringify({ type: "sync", update: Array.from(update) })
+          );
+          this.logger.debug(
+            `Sent initial sync to peer ${peerId} (${update.length} bytes)`
+          );
         }
       } catch (error) {
         this.logger.error(`Error sending initial sync to ${peerId}:`, error);
@@ -412,28 +634,22 @@ export class SimplePeerManager {
 
     dataChannel.onmessage = async (event) => {
       try {
-        // OPTIMIZATION: Use try-catch for JSON parsing to handle malformed messages gracefully
         const message = JSON.parse(event.data);
 
         if (message.type === "sync" && message.update) {
-          // OPTIMIZATION: Apply remote update with origin to prevent re-broadcasting
-          // Reuse Uint8Array to avoid extra allocations
           const updateArray = new Uint8Array(message.update);
           Y.applyUpdate(this.ydoc, updateArray, this);
-          this.logger.debug(`Applied sync update from peer ${peerId} (${updateArray.length} bytes)`);
+          this.logger.debug(
+            `Applied sync update from peer ${peerId} (${updateArray.length} bytes)`
+          );
         } else if (message.type === "sync-chunk" && message.update) {
-          // Handle chunked sync message
           this.handleChunkedMessage(peerId, message);
         } else if (message.type === "awareness" && message.update) {
-          // Apply awareness updates from peer with size limit check
           if (this.awareness.getStates().size < MAX_AWARENESS_STATES) {
             let awarenessUpdate = new Uint8Array(message.update);
-            
-            // OPTIMIZATION: Decompress if compressed flag is set
             if (message.compressed) {
               awarenessUpdate = await decompressData(awarenessUpdate, this.logger);
             }
-            
             applyAwarenessUpdate(this.awareness, awarenessUpdate, null);
           }
         }
@@ -451,188 +667,31 @@ export class SimplePeerManager {
     };
   }
 
-  private async sendOffer(
-    targetPeerId: string,
-    offer: RTCSessionDescriptionInit
-  ): Promise<void> {
-    const signalData: SignalData = {
-      type: "offer",
-      sdp: {
-        type: offer.type!,
-        sdp: offer.sdp!,
-      },
-      from: this.peerId,
-      to: targetPeerId,
-      timestamp: Date.now(),
-    };
-
-    this.logger.debug(
-      `Pushing offer to Firebase path: ${
-        this.getPaths().signaling
-      }/${targetPeerId}`,
-      signalData
-    );
-    const messageRef = push(
-      ref(this.rtdb, `${this.getPaths().signaling}/${targetPeerId}`)
-    );
-    await set(messageRef, signalData);
-    this.logger.debug(`Offer successfully written to Firebase for ${targetPeerId}`);
-  }
-
-  private async sendAnswer(
-    targetPeerId: string,
-    answer: RTCSessionDescriptionInit
-  ): Promise<void> {
-    const signalData: SignalData = {
-      type: "answer",
-      sdp: {
-        type: answer.type!,
-        sdp: answer.sdp!,
-      },
-      from: this.peerId,
-      to: targetPeerId,
-      timestamp: Date.now(),
-    };
-
-    this.logger.debug(`Sending answer to ${targetPeerId}`);
-    const messageRef = push(
-      ref(this.rtdb, `${this.getPaths().signaling}/${targetPeerId}`)
-    );
-    await set(messageRef, signalData);
-    this.logger.debug(`Answer successfully written to Firebase for ${targetPeerId}`);
-  }
-
-  private handleSignalData(signalData: SignalData): void {
-    const { from, type } = signalData;
-    let peer = this.peers.get(from);
-
-    if (!peer && type === "offer") {
-      // Create peer connection for incoming offer
-      this.logger.debug(`Received offer from ${from}, creating peer connection`);
-      this.createPeerConnection(from, false);
-      peer = this.peers.get(from);
-
-      if (!peer) {
-        this.logger.error(`Failed to create peer connection for ${from}`);
-        return;
-      }
-
-      // Immediately handle the offer after creating the peer
-      this.logger.debug(`Set remote description from offer for ${from}`);
-      peer
-        .setRemoteDescription(new RTCSessionDescription(signalData.sdp!))
-        .then(() => {
-          this.logger.debug(`Set remote description for ${from}, creating answer`);
-          return peer!.createAnswer();
-        })
-        .then((answer) => {
-          this.logger.debug(`Created answer for ${from}, setting local description`);
-          return peer!.setLocalDescription(answer);
-        })
-        .then(() => {
-          // Wait for ICE gathering to complete before sending answer (non-trickle ICE)
-          return new Promise<void>((resolve) => {
-            if (peer!.iceGatheringState === "complete") {
-              resolve();
-            } else {
-              const checkGathering = () => {
-                if (peer!.iceGatheringState === "complete") {
-                  peer!.removeEventListener(
-                    "icegatheringstatechange",
-                    checkGathering
-                  );
-                  resolve();
-                }
-              };
-              peer!.addEventListener("icegatheringstatechange", checkGathering);
-            }
-          });
-        })
-        .then(() => {
-          if (peer!.localDescription) {
-            this.logger.debug(`ICE gathering complete, sending answer to ${from}`);
-            return this.sendAnswer(from, peer!.localDescription);
-          }
-        })
-        .then(() => {
-          this.logger.debug(`Answer sent successfully to ${from}`);
-        })
-        .catch((error) => {
-          this.logger.error(`Error handling offer from ${from}:`, error);
-          this.cleanupPeerConnection(from);
-        });
-      return;
-    }
-
-    if (!peer) {
-      // With non-trickle ICE, we don't handle separate ICE candidates
-      // They're bundled in the SDP, so we only need to warn about unexpected signals
-      this.logger.warn(
-        `No peer connection found for ${from}, signal type: ${type}`
-      );
-      return;
-    }
-
-    try {
-      if (type === "offer" && signalData.sdp) {
-        // This shouldn't happen since we handle offers above, but just in case
-        this.logger.warn(`Received duplicate offer from ${from}, ignoring`);
-      } else if (type === "answer" && signalData.sdp) {
-        // Handle incoming answer
-        this.logger.debug(`Received answer from ${from}`);
-        peer
-          .setRemoteDescription(new RTCSessionDescription(signalData.sdp))
-          .then(() => {
-            this.logger.debug(`Set remote description from answer for ${from}`);
-          })
-          .catch((error) => {
-            this.logger.error(`Error handling answer from ${from}:`, error);
-            this.cleanupPeerConnection(from);
-          });
-      }
-    } catch (error) {
-      this.logger.error(`Error processing signal from ${from}:`, error);
-    }
-  }
-
   broadcastUpdate(update: Uint8Array): void {
-    // OPTIMIZATION: Skip broadcasting empty or tiny updates to reduce overhead
-    if (update.length === 0 || update.length < 3) {
-      return;
-    }
-    
+    if (update.length < 3) return;
+
     const updateArray = Array.from(update);
-    const baseMessage = { type: "sync" };
-    const testMessage = JSON.stringify({ ...baseMessage, update: [] });
+    const testMessage = JSON.stringify({ type: "sync", update: [] });
     const maxDataSize = MAX_CHUNK_SIZE - CHUNK_HEADER_SIZE - testMessage.length;
-    
-    // Check if message needs chunking
+
     const totalSize = updateArray.length;
     if (totalSize <= maxDataSize) {
-      // Small message - send as is
-      const message = JSON.stringify({
-        type: "sync",
-        update: updateArray,
-      });
-      this.sendToAllPeers(message);
+      this.sendToAllPeers(JSON.stringify({ type: "sync", update: updateArray }));
     } else {
-      // Large message - chunk it
       const chunks = Math.ceil(totalSize / maxDataSize);
       const messageId = `${this.peerId}-${Date.now()}`;
-      
       for (let i = 0; i < chunks; i++) {
         const start = i * maxDataSize;
         const end = Math.min(start + maxDataSize, totalSize);
-        const chunk = updateArray.slice(start, end);
-        
-        const message = JSON.stringify({
-          type: "sync-chunk",
-          messageId,
-          chunk: i,
-          totalChunks: chunks,
-          update: chunk,
-        });
-        this.sendToAllPeers(message);
+        this.sendToAllPeers(
+          JSON.stringify({
+            type: "sync-chunk",
+            messageId,
+            chunk: i,
+            totalChunks: chunks,
+            update: updateArray.slice(start, end),
+          })
+        );
       }
     }
   }
@@ -642,8 +701,6 @@ export class SimplePeerManager {
       if (dataChannel.readyState === "open") {
         try {
           dataChannel.send(message);
-          // Update peer sync state after sending update
-          this.peerSyncState.set(peerId, Y.encodeStateVector(this.ydoc));
         } catch (error) {
           this.logger.error(`Error sending update to peer ${peerId}:`, error);
         }
@@ -652,480 +709,85 @@ export class SimplePeerManager {
   }
 
   async broadcastAwareness(update: Uint8Array): Promise<void> {
-    // OPTIMIZATION: Compress awareness updates using native browser API (60-80% bandwidth reduction)
     const { compressed, isCompressed } = await compressData(update, this.logger);
-    
     const message = JSON.stringify({
       type: "awareness",
       update: Array.from(compressed),
-      compressed: isCompressed, // Flag to decompress on receiver
+      compressed: isCompressed,
     });
-    
-    this.dataChannels.forEach((dataChannel, peerId) => {
-      if (dataChannel.readyState === "open") {
-        try {
-          dataChannel.send(message);
-        } catch (error) {
-          this.logger.error(`Error sending awareness to peer ${peerId}:`, error);
-        }
-      }
-    });
+    this.sendToAllPeers(message);
   }
 
-  getPeerCount(): number {
-    return Array.from(this.peers.values()).filter(
-      (peer) => peer.connectionState === "connected"
-    ).length;
-  }
-
-  getConnectionStatus(): "connecting" | "connected" | "disconnected" {
-    return this.connectionStatus;
-  }
-
-  private handleChunkedMessage(peerId: string, message: {
-    messageId: string;
-    chunk: number;
-    totalChunks: number;
-    update: number[];
-  }): void {
+  private handleChunkedMessage(
+    peerId: string,
+    message: {
+      messageId: string;
+      chunk: number;
+      totalChunks: number;
+      update: number[];
+    }
+  ): void {
     const { chunk, totalChunks, update } = message;
-    
-    // Initialize buffer for this peer if needed
+
     if (!this.chunkBuffers.has(peerId)) {
       this.chunkBuffers.set(peerId, new Map());
     }
-    
     const peerBuffer = this.chunkBuffers.get(peerId)!;
-    
-    // Initialize buffer for this message if needed
+
     if (!peerBuffer.has(chunk)) {
       peerBuffer.set(chunk, { chunk: update, totalChunks });
     }
-    
-    // Check if we have all chunks
+
     if (peerBuffer.size === totalChunks) {
-      // Reassemble the complete message
       const completeUpdate: number[] = [];
       for (let i = 0; i < totalChunks; i++) {
         const chunkData = peerBuffer.get(i);
-        if (chunkData) {
-          completeUpdate.push(...chunkData.chunk);
-        }
+        if (chunkData) completeUpdate.push(...chunkData.chunk);
       }
-      
-      // Apply the complete update
       Y.applyUpdate(this.ydoc, new Uint8Array(completeUpdate), this);
-      
-      // Clean up the buffer for this message
       peerBuffer.clear();
     }
   }
 
-  private cleanupIdlePeers(): void {
-    const now = Date.now();
-    const idleTimeout = IDLE_PEER_TIMEOUT_MS;
-
-    this.peers.forEach((peer, peerId) => {
-      if (
-        peer.connectionState !== "connected" &&
-        now - this.lastCleanup > idleTimeout
-      ) {
-        peer.close();
-        this.peers.delete(peerId);
-        this.dataChannels.delete(peerId);
-        this.chunkBuffers.delete(peerId); // Clean up chunk buffers
-      }
-    });
-
-    this.lastCleanup = now;
-  }
-
-  private performMemoryCleanup(): void {
-    // Clean up idle peers
-    this.cleanupIdlePeers();
-
-    // Clean up awareness states if too many
+  private cleanupAwarenessStates(): void {
     const awarenessStates = this.awareness.getStates();
-    if (awarenessStates.size > MAX_AWARENESS_STATES) {
-      this.logger.warn("Too many awareness states, cleaning up old ones");
-      // Remove stale awareness states (keep only connected peers)
-      const connectedPeerIds = new Set(
-        Array.from(this.peers.keys()).filter((id) => {
-          const peer = this.peers.get(id);
-          return peer && peer.connectionState === "connected";
-        })
-      );
-      connectedPeerIds.add(this.peerId); // Remove states for disconnected peers
-      const clientsToRemove: number[] = [];
-      awarenessStates.forEach((_state: unknown, clientId: number) => {
-        if (
-          !connectedPeerIds.has(String(clientId)) &&
-          clientId !== this.ydoc.clientID
-        ) {
-          clientsToRemove.push(clientId);
-        }
-      });
+    if (awarenessStates.size <= MAX_AWARENESS_STATES) return;
 
-      if (clientsToRemove.length > 0) {
-        // Properly remove stale awareness states
-        removeAwarenessStates(this.awareness, clientsToRemove, null);
-        this.logger.debug(`Removed ${clientsToRemove.length} stale awareness states`);
-      }
-    }
-  }
-
-  private cleanupPeerConnection(peerId: string): void {
-    const peer = this.peers.get(peerId);
-    if (peer) {
-      try {
-        peer.close();
-      } catch (e) {
-        this.logger.warn(`Error closing peer ${peerId}:`, e);
-      }
-      this.peers.delete(peerId);
-    }
-
-    const dataChannel = this.dataChannels.get(peerId);
-    if (dataChannel) {
-      try {
-        dataChannel.close();
-      } catch (e) {
-        this.logger.warn(`Error closing data channel for ${peerId}:`, e);
-      }
-      this.dataChannels.delete(peerId);
-    }
-
-    this.connectionTimestamps.delete(peerId);
-    
-    // Clean up delta sync state
-    this.peerSyncState.delete(peerId);
-    
-    // Clean up chunk buffers
-    this.chunkBuffers.delete(peerId);
-
-    // Remove peer from Firebase presence immediately (WebRTC-based stale detection)
-    // This provides instant cleanup when WebRTC detects disconnection/failure
-    stopAnnouncingPresence(
-      this.rtdb,
-      this.docId,
-      peerId,
-      this.databasePaths,
-      this.logger
-    ).catch((error) =>
-      this.logger.warn(`Failed to remove presence for ${peerId}:`, error)
-    );
-
-    this.emit("peer-left", { peerId });
-  }
-
-  private startPeriodicCleanup(): void {
-    if (this.cleanupInterval) {
-      clearInterval(this.cleanupInterval);
-    }
-    this.cleanupInterval = setInterval(async () => {
-      if (this.isDestroyed) return;
-
-      const now = Date.now();
-      const staleTimeout = STALE_CONNECTION_TIMEOUT_MS;
-
-      // Clean up stale connections
-      this.connectionTimestamps.forEach((timestamp, peerId) => {
-        if (now - timestamp > staleTimeout) {
-          this.logger.debug(`Cleaning up stale connection to peer ${peerId}`);
-          this.cleanupPeerConnection(peerId);
-        }
-      });
-
-      // Clean up stale peers from Firebase
-      try {
-        await cleanupStalePeers(
-          this.rtdb,
-          this.docId,
-          this.databasePaths,
-          this.logger
-        );
-      } catch (error) {
-        this.logger.warn("Failed to cleanup stale peers from Firebase:", error);
-      }
-
-      // Perform general memory cleanup
-      this.performMemoryCleanup();
-    }, CLEANUP_INTERVAL_MS); // Run every 30 seconds
-  }
-
-  private startHeartbeat(): void {
-    if (this.heartbeatInterval) {
-      clearInterval(this.heartbeatInterval);
-    }
-
-    // Track last visibility update time for throttling
-    let lastVisibilityUpdate = 0;
-
-    // Helper function to update presence with promise serialization
-    const updatePresence = async () => {
-      if (this.isDestroyed) return;
-
-      // Serialize presence updates to prevent race conditions
-      if (this.pendingPresenceUpdate) {
-        try {
-          await this.pendingPresenceUpdate;
-        } catch (error) {
-          // Ignore errors from previous update
-          this.logger.warn("Previous presence update failed:", error);
-        }
-      }
-
-      // Create new pending update
-      this.pendingPresenceUpdate = (async () => {
-        try {
-          // Update our lastSeen timestamp in Firebase
-          const paths = this.getPaths();
-          const peerRef = ref(this.rtdb, `${paths.rooms}/peers/${this.peerId}`);
-
-          // Set up automatic cleanup on disconnect (Firebase handles this)
-          const { onDisconnect } = await import("firebase/database");
-          await onDisconnect(peerRef).remove();
-
-          // Reduced payload: only id and lastSeen (removed name and connectedAt for cost savings)
-          const currentData = {
-            id: this.peerId,
-            lastSeen: Date.now(),
-          };
-          await set(peerRef, currentData);
-        } catch (error) {
-          this.logger.warn("Failed to update heartbeat:", error);
-          throw error; // Re-throw to mark promise as rejected
-        } finally {
-          this.pendingPresenceUpdate = null;
-        }
-      })();
-
-      return this.pendingPresenceUpdate;
-    };
-
-    // Set up timer-based heartbeat (every 5 minutes)
-    this.heartbeatInterval = setInterval(updatePresence, HEARTBEAT_INTERVAL_MS);
-
-    // Set up throttled visibility change handler
-    if (typeof document !== "undefined") {
-      this.visibilityChangeHandler = () => {
-        const now = Date.now();
-        // Only update if tab becomes visible AND throttle period has passed
-        if (
-          !document.hidden &&
-          now - lastVisibilityUpdate > MIN_VISIBILITY_UPDATE_INTERVAL
-        ) {
-          lastVisibilityUpdate = now;
-          updatePresence().catch(() => {
-            // Error already logged in updatePresence
-          });
-        }
-      };
-
-      document.addEventListener(
-        "visibilitychange",
-        this.visibilityChangeHandler
-      );
-    }
-
-    // Send initial presence update immediately
-    updatePresence().catch(() => {
-      // Error already logged in updatePresence
+    this.logger.warn("Too many awareness states, cleaning up old ones");
+    const clientsToRemove: number[] = [];
+    awarenessStates.forEach((_state: unknown, clientId: number) => {
+      if (clientId !== this.ydoc.clientID) clientsToRemove.push(clientId);
     });
+    if (clientsToRemove.length > 0) {
+      removeAwarenessStates(this.awareness, clientsToRemove, null);
+    }
   }
+}
 
-  private persistDocumentSync: (() => void) | null = null;
-
-  setPersistHandler(handler: () => void): void {
-    this.persistDocumentSync = handler;
-  }
-
-  private setupBeforeUnloadHandler(): void {
-    this.beforeUnloadHandler = () => {
-      // CRITICAL: Persist document before page unload to prevent data loss
-      try {
-        if (this.persistDocumentSync) {
-          this.persistDocumentSync();
-        }
-      } catch (error) {
-        this.logger.warn("Error persisting document on unload:", error);
-      }
-
-      // Synchronously clean up our presence on actual page unload
-      try {
-        const paths = this.getPaths();
-        const peerRef = ref(this.rtdb, `${paths.rooms}/peers/${this.peerId}`);
-        // Firebase's onDisconnect() handles cleanup automatically
-        // Just attempt direct cleanup as best effort
-        remove(peerRef);
-      } catch (error) {
-        this.logger.warn("Error in beforeunload cleanup:", error);
+// ICE gathering can take tens of seconds to complete when a STUN server is
+// unreachable, even though usable candidates arrive almost immediately.
+function waitForIceGathering(pc: RTCPeerConnection): Promise<void> {
+  if (pc.iceGatheringState === "complete") return Promise.resolve();
+  return new Promise((resolve) => {
+    let settleTimer: Timer | null = null;
+    const done = () => {
+      pc.removeEventListener("icegatheringstatechange", onStateChange);
+      pc.removeEventListener("icecandidate", onCandidate);
+      clearTimeout(capTimer);
+      if (settleTimer) clearTimeout(settleTimer);
+      resolve();
+    };
+    const onStateChange = () => {
+      if (pc.iceGatheringState === "complete") done();
+    };
+    const onCandidate = (event: Event) => {
+      const candidate = (event as RTCPeerConnectionIceEvent).candidate;
+      if (candidate && candidate.type !== "host" && !settleTimer) {
+        settleTimer = setTimeout(done, ICE_SETTLE_MS);
       }
     };
-
-    // Handle tab visibility changes (different from page unload)
-    this.visibilityChangeHandler = async () => {
-      if (typeof document === "undefined") return;
-
-      const isNowVisible = !document.hidden;
-
-      if (isNowVisible && !this.isTabVisible) {
-        // Tab became visible - resume activity
-        this.logger.debug("Tab visible: resuming collaboration");
-        this.isTabVisible = true;
-
-        // Resume heartbeat immediately
-        if (this.heartbeatInterval) {
-          clearInterval(this.heartbeatInterval);
-        }
-        this.startHeartbeat();
-
-        // Update presence immediately
-        try {
-          const paths = this.getPaths();
-          const peerRef = ref(this.rtdb, `${paths.rooms}/peers/${this.peerId}`);
-          const { onDisconnect } = await import("firebase/database");
-          await onDisconnect(peerRef).remove();
-
-          await set(peerRef, {
-            id: this.peerId,
-            name: `User-${this.peerId.slice(0, PEER_ID_DISPLAY_LENGTH)}`,
-            connectedAt: Date.now(),
-            lastSeen: Date.now(),
-          });
-        } catch (error) {
-          this.logger.warn("Failed to update presence on tab visible:", error);
-        }
-
-        // Check peer connections and reconnect if needed
-        this.checkAndReconnectPeers();
-      } else if (!isNowVisible && this.isTabVisible) {
-        // Tab became hidden - pause heartbeat to save resources
-        this.logger.debug("Tab hidden: pausing heartbeat (connections maintained)");
-        this.isTabVisible = false;
-        // Note: We don't stop heartbeat completely, just rely on existing interval
-        // Firebase will keep connection alive, and onDisconnect() will handle cleanup if needed
-      }
-    };
-
-    if (typeof window !== "undefined") {
-      window.addEventListener("beforeunload", this.beforeUnloadHandler);
-      // Also handle page hide (mobile Safari, etc.) - actual page unload
-      window.addEventListener("pagehide", this.beforeUnloadHandler);
-      // Handle tab visibility changes - pause/resume activity
-      window.addEventListener("visibilitychange", this.visibilityChangeHandler);
-    }
-  }
-
-  private async checkAndReconnectPeers(): Promise<void> {
-    // Check if we have active peer connections
-    const connectedPeers = Array.from(this.peers.values()).filter(
-      (p) => p.connectionState === "connected"
-    ).length;
-
-    if (connectedPeers === 0 && this.peers.size > 0) {
-      // We have peer objects but none are connected - clean up and reconnect
-      this.logger.debug(
-        "No active peer connections after tab visible, reconnecting..."
-      );
-
-      // Clean up stale connections
-      this.peers.forEach((peer, peerId) => {
-        if (peer.connectionState !== "connected") {
-          try {
-            this.cleanupPeerConnection(peerId);
-          } catch {
-            // Ignore errors during cleanup
-          }
-        }
-      });
-
-      // Force a cleanup to discover peers again
-      try {
-        await cleanupStalePeers(
-          this.rtdb,
-          this.docId,
-          this.databasePaths,
-          this.logger
-        );
-      } catch (error) {
-        this.logger.warn("Failed to cleanup stale peers on reconnect:", error);
-      }
-    }
-  }
-
-  destroy(): void {
-    // Mark as destroyed first
-    this.isDestroyed = true;
-
-    // Perform final cleanup
-    this.performMemoryCleanup();
-
-    // Close all peer connections
-    this.peers.forEach((peer) => {
-      try {
-        peer.close();
-      } catch (e) {
-        this.logger.warn("Error closing peer:", e);
-      }
-    });
-    this.peers.clear();
-
-    // Close all data channels
-    this.dataChannels.forEach((dataChannel) => {
-      try {
-        dataChannel.close();
-      } catch (e) {
-        this.logger.warn("Error closing data channel:", e);
-      }
-    });
-    this.dataChannels.clear();
-    
-    // Clear delta sync state
-    this.peerSyncState.clear();
-
-    // Remove Firebase listeners
-    if (this.signalingListenerUnsubscribe) {
-      this.signalingListenerUnsubscribe();
-      this.signalingListenerUnsubscribe = null;
-    }
-    
-    if (this.peersAddedListenerUnsubscribe) {
-      this.peersAddedListenerUnsubscribe();
-      this.peersAddedListenerUnsubscribe = null;
-    }
-    
-    if (this.peersRemovedListenerUnsubscribe) {
-      this.peersRemovedListenerUnsubscribe();
-      this.peersRemovedListenerUnsubscribe = null;
-    }
-
-    if (this.signalingRef) {
-      off(this.signalingRef);
-      this.signalingRef = null;
-    }
-
-    if (this.peersRef) {
-      off(this.peersRef);
-      this.peersRef = null;
-    }
-
-    // Remove event listeners
-    if (typeof window !== "undefined") {
-      if (this.beforeUnloadHandler) {
-        window.removeEventListener("beforeunload", this.beforeUnloadHandler);
-        window.removeEventListener("pagehide", this.beforeUnloadHandler);
-      }
-    }
-
-    if (typeof document !== "undefined" && this.visibilityChangeHandler) {
-      document.removeEventListener(
-        "visibilitychange",
-        this.visibilityChangeHandler
-      );
-      this.visibilityChangeHandler = null;
-    }
-
-    this.connectionStatus = "disconnected";
-  }
+    const capTimer = setTimeout(done, ICE_GATHERING_MAX_MS);
+    pc.addEventListener("icegatheringstatechange", onStateChange);
+    pc.addEventListener("icecandidate", onCandidate);
+  });
 }
