@@ -5,11 +5,8 @@ import {
   persistDocument,
   startPeriodicPersistence,
 } from "./firebase/persistence";
-import {
-  encodeAwarenessUpdate,
-  removeAwarenessStates,
-} from "y-protocols/awareness";
-import { SimplePeerManager } from "./core/peer-manager";
+import { encodeAwarenessUpdate } from "y-protocols/awareness";
+import { SimplePeerManager, RemoteOrigin } from "./core/peer-manager";
 import type {
   AdapterOptions,
   AdapterEvents,
@@ -20,8 +17,6 @@ import {
   DEFAULT_SYNC_INTERVAL_MS,
   DEFAULT_MAX_DIRECT_PEERS,
   PEER_ID_DISPLAY_LENGTH,
-  MAX_AWARENESS_STATES,
-  MEMORY_CHECK_INTERVAL_MS,
   AWARENESS_THROTTLE_MS,
 } from "./utils/constants";
 import { resolveLogger } from "./utils/logger";
@@ -51,12 +46,6 @@ export async function createFirebaseYWebrtcAdapter(
   ydoc.gcFilter = () => true;
 
   const awareness = new Awareness(ydoc);
-  // Limit awareness state size to prevent memory bloat
-  const maxAwarenessStates = MAX_AWARENESS_STATES;
-
-  // Memory monitoring for long-running sessions
-  let lastMemoryCheck = Date.now();
-  const memoryCheckInterval = MEMORY_CHECK_INTERVAL_MS;
 
   // 2) Load persisted state from Firebase (if any)
   try {
@@ -97,10 +86,10 @@ export async function createFirebaseYWebrtcAdapter(
   let pendingUpdates: Uint8Array[] = [];
   const UPDATE_BATCH_MS = 50; // Batch updates within 50ms window
   
-  ydoc.on("update", (update: Uint8Array, origin: any) => {
+  ydoc.on("update", (update: Uint8Array, origin: unknown) => {
     // Only broadcast updates that originated locally
     // This prevents echo/loops and improves performance
-    if (origin !== peerManager) {
+    if (!(origin instanceof RemoteOrigin)) {
       // Collect updates for batching
       pendingUpdates.push(update);
       
@@ -137,15 +126,20 @@ export async function createFirebaseYWebrtcAdapter(
 
   awareness.on(
     "update",
-    ({
-      added,
-      updated,
-      removed,
-    }: {
-      added: number[];
-      updated: number[];
-      removed: number[];
-    }) => {
+    (
+      {
+        added,
+        updated,
+        removed,
+      }: {
+        added: number[];
+        updated: number[];
+        removed: number[];
+      },
+      origin: unknown
+    ) => {
+      // Removing a departed peer's cursors is local; others may still reach it.
+      if (origin === "peer-left") return;
       const changedClients = added.concat(updated, removed);
 
       // Collect all changed client IDs
@@ -163,10 +157,7 @@ export async function createFirebaseYWebrtcAdapter(
             awareness,
             Array.from(pendingAwarenessChanges)
           );
-          // Fire and forget - compression happens asynchronously
-          peerManager.broadcastAwareness(awarenessUpdate).catch((error) => {
-            logger.warn("Failed to broadcast awareness:", error);
-          });
+          peerManager.broadcastAwareness(awarenessUpdate);
           pendingAwarenessChanges.clear();
         }
         awarenessBatchTimer = null;
@@ -216,51 +207,7 @@ export async function createFirebaseYWebrtcAdapter(
   // 9) Initialize peer connections
   await peerManager.start();
 
-  // 10) Set up memory monitoring
-  const memoryMonitorTimer = setInterval(() => {
-    const now = Date.now();
-    if (now - lastMemoryCheck > memoryCheckInterval) {
-      lastMemoryCheck = now;
-
-      // Note: Y.js garbage collection runs automatically when ydoc.gc = true
-      // No manual intervention needed - GC cleans up deleted operations automatically
-
-      // Clean up awareness states if needed
-      const awarenessStates = awareness.getStates();
-      if (awarenessStates.size > maxAwarenessStates) {
-        logger.warn(
-          `Too many awareness states (${awarenessStates.size}), cleaning up`
-        );
-        // Get list of currently connected peers from peer manager
-        const connectedPeers = new Set<number>();
-        connectedPeers.add(ydoc.clientID); // Always keep our own client
-
-        // Collect client IDs that should be removed (stale states)
-        const clientsToRemove: number[] = [];
-        awarenessStates.forEach((_state, clientId) => {
-          // Keep only our own state and remove others
-          // The peer manager will re-add connected peers' states
-          if (clientId !== ydoc.clientID) {
-            clientsToRemove.push(clientId);
-          }
-        });
-
-        if (clientsToRemove.length > 0) {
-          // Remove stale awareness states properly
-          removeAwarenessStates(awareness, clientsToRemove, null);
-          logger.debug(
-            `Removed ${clientsToRemove.length} stale awareness states`
-          );
-        }
-      }
-    }
-  }, memoryCheckInterval);
-
-  // 11) Wire cleanup with comprehensive memory management
   const disconnect = () => {
-    // Clear memory monitoring
-    clearInterval(memoryMonitorTimer);
-
     // Clear awareness throttle timer to prevent memory leaks
     if (awarenessBatchTimer) {
       clearTimeout(awarenessBatchTimer);

@@ -3,22 +3,50 @@
 
 type Listener = (event: { data?: unknown; channel?: FakeDataChannel }) => void
 
-export class FakeDataChannel {
-  readyState: 'connecting' | 'open' | 'closing' | 'closed' = 'connecting'
+export class FakeDataChannel extends EventTarget {
+  static maxMessageSize = 256 * 1024
+  static sendBufferCapacity = 16 * 1024 * 1024
+  static all: FakeDataChannel[] = []
+
+  readyState: RTCDataChannelState = 'connecting'
   bufferedAmount = 0
+  bufferedAmountLowThreshold = 0
+  binaryType: BinaryType = 'blob'
   remote: FakeDataChannel | null = null
   onopen: (() => void) | null = null
   onclose: (() => void) | null = null
   onerror: ((e: unknown) => void) | null = null
   onmessage: Listener | null = null
 
-  constructor(readonly label: string) {}
+  constructor(readonly label: string) {
+    super()
+    FakeDataChannel.all.push(this)
+  }
 
-  send(data: unknown): void {
+  send(data: string | ArrayBuffer | ArrayBufferView): void {
     if (this.readyState !== 'open') throw new Error(`InvalidStateError: channel is ${this.readyState}`)
+    const payload =
+      typeof data === 'string'
+        ? data
+        : ArrayBuffer.isView(data)
+          ? data.buffer.slice(data.byteOffset, data.byteOffset + data.byteLength)
+          : data.slice(0)
+    const size = typeof payload === 'string' ? Buffer.byteLength(payload) : payload.byteLength
+    if (size > FakeDataChannel.maxMessageSize) {
+      throw new TypeError(`OperationError: message of ${size} bytes exceeds maxMessageSize`)
+    }
+    if (this.bufferedAmount + size > FakeDataChannel.sendBufferCapacity) {
+      throw new Error('OperationError: RTCDataChannel send queue is full')
+    }
+    this.bufferedAmount += size
     const remote = this.remote
     setTimeout(() => {
-      if (remote?.readyState === 'open') remote.onmessage?.({ data })
+      const before = this.bufferedAmount
+      this.bufferedAmount -= size
+      if (before > this.bufferedAmountLowThreshold && this.bufferedAmount <= this.bufferedAmountLowThreshold) {
+        this.dispatchEvent(new Event('bufferedamountlow'))
+      }
+      if (remote?.readyState === 'open') remote.onmessage?.({ data: payload })
     }, 0)
   }
 
@@ -175,4 +203,17 @@ export function resetFakeWebRTC(): void {
   FakeRTCPeerConnection.registry.clear()
   FakeRTCPeerConnection.isBlocked = () => false
   FakeRTCPeerConnection.gatheringCompleteMs = 0
+  FakeDataChannel.maxMessageSize = 256 * 1024
+  FakeDataChannel.sendBufferCapacity = 16 * 1024 * 1024
+  FakeDataChannel.all = []
+}
+
+export function fakeChannelPair(): [FakeDataChannel, FakeDataChannel] {
+  const a = new FakeDataChannel('a')
+  const b = new FakeDataChannel('b')
+  a.remote = b
+  b.remote = a
+  a.open()
+  b.open()
+  return [a, b]
 }

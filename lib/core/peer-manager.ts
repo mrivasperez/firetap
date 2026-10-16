@@ -12,21 +12,25 @@ import {
   onValue,
   serverTimestamp,
 } from "firebase/database";
-import { applyAwarenessUpdate } from "y-protocols/awareness";
+import {
+  applyAwarenessUpdate,
+  encodeAwarenessUpdate,
+  removeAwarenessStates,
+} from "y-protocols/awareness";
 
 import { type DatabasePathsConfig, buildDatabasePaths } from "../utils/config";
+import { compressText, decompressText } from "../utils/compression";
 import {
-  compressData,
-  decompressData,
-  compressText,
-  decompressText,
-} from "../utils/compression";
+  PeerSession,
+  MSG_AWARENESS,
+  MSG_SYNC_STEP1,
+  MSG_SYNC_STEP2,
+  MSG_UPDATE,
+  PROTOCOL_VERSION,
+} from "./peer-session";
 import {
   PEER_ID_DISPLAY_LENGTH,
-  MAX_AWARENESS_STATES,
   STUN_SERVERS,
-  MAX_CHUNK_SIZE,
-  CHUNK_HEADER_SIZE,
   CONNECT_TIMEOUT_MS,
   DISCONNECT_GRACE_MS,
   RETRY_BASE_MS,
@@ -44,6 +48,10 @@ import type { ConnectionState } from "../utils/config";
 import { defaultLogger, type Logger } from "../utils/logger";
 
 type Timer = ReturnType<typeof setTimeout>;
+
+export class RemoteOrigin {
+  constructor(readonly peerId: string) {}
+}
 
 type PeerConnectionEntry = {
   pc: RTCPeerConnection;
@@ -93,15 +101,15 @@ export class SimplePeerManager {
 
   private presentPeers = new Map<string, PresenceEntry>();
 
-  // WebRTC peer connections
   private peers = new Map<string, PeerConnectionEntry>();
-  private dataChannels = new Map<string, RTCDataChannel>();
-
-  // Chunked message reassembly buffers
-  private chunkBuffers = new Map<
+  private sessions = new Map<
     string,
-    Map<number, { chunk: number[]; totalChunks: number }>
+    { channel: RTCDataChannel; session: PeerSession }
   >();
+  private origins = new Map<string, RemoteOrigin>();
+
+  // Peers relay each other's cursors, so track which clients came from each peer.
+  private awarenessClientsByPeer = new Map<string, Set<number>>();
 
   private persistDocumentSync: (() => void) | null = null;
 
@@ -214,6 +222,7 @@ export class SimplePeerManager {
       })
     );
 
+    this.awareness.on("update", this.onAwarenessUpdate);
     this.addPageListeners();
   }
 
@@ -223,6 +232,7 @@ export class SimplePeerManager {
     this.runId++;
 
     this.removePageListeners();
+    this.awareness.off("update", this.onAwarenessUpdate);
     this.unsubscribers.splice(0).forEach((unsubscribe) => unsubscribe());
     this.retryTimers.forEach((timer) => clearTimeout(timer));
     this.retryTimers.clear();
@@ -232,7 +242,6 @@ export class SimplePeerManager {
       this.cleanupPeerConnection(peerId);
     }
     this.presentPeers.clear();
-    this.chunkBuffers.clear();
 
     // onDisconnect stays registered in case this write doesn't reach the server.
     const peerRef = this.presenceRef();
@@ -404,7 +413,7 @@ export class SimplePeerManager {
   private createPeerConnection(
     otherPeerId: string,
     initiator: boolean,
-    connectionId: string = crypto.randomUUID()
+    connectionId: string = crypto.randomUUID().slice(0, 8)
   ): PeerConnectionEntry | null {
     if (!this.running || this.peers.has(otherPeerId)) return null;
 
@@ -476,9 +485,7 @@ export class SimplePeerManager {
     };
 
     if (initiator) {
-      const dataChannel = pc.createDataChannel("data");
-      this.dataChannels.set(otherPeerId, dataChannel);
-      this.setupDataChannel(otherPeerId, dataChannel);
+      this.setupDataChannel(otherPeerId, pc.createDataChannel("data"));
 
       pc.createOffer()
         .then((offer) => pc.setLocalDescription(offer))
@@ -495,7 +502,6 @@ export class SimplePeerManager {
     } else {
       pc.ondatachannel = (event) => {
         if (!isCurrent()) return;
-        this.dataChannels.set(otherPeerId, event.channel);
         this.setupDataChannel(otherPeerId, event.channel);
       };
     }
@@ -519,17 +525,18 @@ export class SimplePeerManager {
       }
     }
 
-    const dataChannel = this.dataChannels.get(otherPeerId);
-    if (dataChannel) {
-      this.dataChannels.delete(otherPeerId);
+    const current = this.sessions.get(otherPeerId);
+    if (current) {
+      this.sessions.delete(otherPeerId);
+      current.session.close();
       try {
-        dataChannel.close();
+        current.channel.close();
       } catch (e) {
         this.logger.warn(`Error closing data channel for ${otherPeerId}:`, e);
       }
     }
 
-    this.chunkBuffers.delete(otherPeerId);
+    this.removePeerAwareness(otherPeerId);
 
     if (entry?.wasConnected) {
       this.emit("peer-left", { peerId: otherPeerId });
@@ -549,9 +556,7 @@ export class SimplePeerManager {
       type,
       ...(sdpGz ? { sdpGz } : { sdp }),
       from: this.peerId,
-      to: targetPeerId,
       connectionId,
-      timestamp: Date.now(),
     };
     const messageRef = push(
       ref(this.rtdb, `${this.getPaths().signaling}/${targetPeerId}`)
@@ -620,145 +625,119 @@ export class SimplePeerManager {
     }
   }
 
-  private setupDataChannel(peerId: string, dataChannel: RTCDataChannel): void {
-    dataChannel.onopen = () => {
+  originFor(peerId: string): RemoteOrigin {
+    let origin = this.origins.get(peerId);
+    if (!origin) {
+      origin = new RemoteOrigin(peerId);
+      this.origins.set(peerId, origin);
+    }
+    return origin;
+  }
+
+  private setupDataChannel(peerId: string, channel: RTCDataChannel): void {
+    const session = new PeerSession(channel, {
+      onMessage: (type, payload) => this.handleMessage(peerId, session, type, payload),
+      onError: (error) => {
+        this.logger.warn(`Closing connection to ${peerId}: ${error.message}`);
+        if (this.sessions.get(peerId)?.session === session) {
+          this.cleanupPeerConnection(peerId, { retry: true });
+        }
+      },
+    });
+    this.sessions.set(peerId, { channel, session });
+
+    channel.onopen = () => {
       this.logger.debug(`Data channel opened for peer ${peerId}`);
+      // The peer answers our state vector with exactly what we're missing.
+      const step1 = Y.encodeStateVector(this.ydoc);
+      const payload = new Uint8Array(1 + step1.length);
+      payload[0] = PROTOCOL_VERSION;
+      payload.set(step1, 1);
+      session.send(MSG_SYNC_STEP1, payload);
 
-      try {
-        const update = Y.encodeStateAsUpdate(this.ydoc);
-        if (update.length > 0) {
-          dataChannel.send(
-            JSON.stringify({ type: "sync", update: Array.from(update) })
-          );
-          this.logger.debug(
-            `Sent initial sync to peer ${peerId} (${update.length} bytes)`
-          );
-        }
-      } catch (error) {
-        this.logger.error(`Error sending initial sync to ${peerId}:`, error);
+      const clients = Array.from(this.awareness.getStates().keys());
+      if (clients.length > 0) {
+        session.send(MSG_AWARENESS, encodeAwarenessUpdate(this.awareness, clients));
       }
+      session.flush();
     };
 
-    dataChannel.onmessage = async (event) => {
-      try {
-        const message = JSON.parse(event.data);
+    channel.onmessage = (event) => session.receive(event.data as ArrayBuffer);
 
-        if (message.type === "sync" && message.update) {
-          const updateArray = new Uint8Array(message.update);
-          Y.applyUpdate(this.ydoc, updateArray, this);
-          this.logger.debug(
-            `Applied sync update from peer ${peerId} (${updateArray.length} bytes)`
-          );
-        } else if (message.type === "sync-chunk" && message.update) {
-          this.handleChunkedMessage(peerId, message);
-        } else if (message.type === "awareness" && message.update) {
-          if (this.awareness.getStates().size < MAX_AWARENESS_STATES) {
-            let awarenessUpdate = new Uint8Array(message.update);
-            if (message.compressed) {
-              awarenessUpdate = await decompressData(awarenessUpdate, this.logger);
-            }
-            applyAwarenessUpdate(this.awareness, awarenessUpdate, null);
-          }
-        }
-      } catch (error) {
-        this.logger.error("Error parsing peer data:", error);
-      }
+    channel.onerror = (error) => {
+      // Fires when the remote page closes; onclose handles it.
+      this.logger.debug(`Data channel error for peer ${peerId}:`, error);
     };
 
-    dataChannel.onerror = (error) => {
-      this.logger.error(`Data channel error for peer ${peerId}:`, error);
-    };
-
-    dataChannel.onclose = () => {
+    channel.onclose = () => {
       this.logger.debug(`Data channel closed for peer ${peerId}`);
-      if (this.dataChannels.get(peerId) === dataChannel) {
+      if (this.sessions.get(peerId)?.session === session) {
         this.cleanupPeerConnection(peerId, { retry: true });
       }
     };
   }
 
+  private handleMessage(
+    peerId: string,
+    session: PeerSession,
+    type: number,
+    payload: Uint8Array
+  ): void {
+    switch (type) {
+      case MSG_SYNC_STEP1: {
+        if (payload[0] !== PROTOCOL_VERSION) {
+          throw new Error(`unsupported protocol version ${payload[0]}`);
+        }
+        const theirStateVector = payload.subarray(1);
+        session.send(MSG_SYNC_STEP2, Y.encodeStateAsUpdate(this.ydoc, theirStateVector));
+        break;
+      }
+      case MSG_SYNC_STEP2:
+      case MSG_UPDATE:
+        Y.applyUpdate(this.ydoc, payload, this.originFor(peerId));
+        break;
+      case MSG_AWARENESS:
+        applyAwarenessUpdate(this.awareness, payload, this.originFor(peerId));
+        break;
+    }
+  }
+
   broadcastUpdate(update: Uint8Array): void {
     if (update.length < 3) return;
-
-    const updateArray = Array.from(update);
-    const testMessage = JSON.stringify({ type: "sync", update: [] });
-    const maxDataSize = MAX_CHUNK_SIZE - CHUNK_HEADER_SIZE - testMessage.length;
-
-    const totalSize = updateArray.length;
-    if (totalSize <= maxDataSize) {
-      this.sendToAllPeers(JSON.stringify({ type: "sync", update: updateArray }));
-    } else {
-      const chunks = Math.ceil(totalSize / maxDataSize);
-      const messageId = `${this.peerId}-${Date.now()}`;
-      for (let i = 0; i < chunks; i++) {
-        const start = i * maxDataSize;
-        const end = Math.min(start + maxDataSize, totalSize);
-        this.sendToAllPeers(
-          JSON.stringify({
-            type: "sync-chunk",
-            messageId,
-            chunk: i,
-            totalChunks: chunks,
-            update: updateArray.slice(start, end),
-          })
-        );
-      }
-    }
+    this.sessions.forEach(({ session }) => session.send(MSG_UPDATE, update));
   }
 
-  private sendToAllPeers(message: string): void {
-    this.dataChannels.forEach((dataChannel, peerId) => {
-      if (dataChannel.readyState === "open") {
-        try {
-          dataChannel.send(message);
-        } catch (error) {
-          this.logger.error(`Error sending update to peer ${peerId}:`, error);
-        }
-      }
-    });
+  broadcastAwareness(update: Uint8Array): void {
+    this.sessions.forEach(({ session }) => session.send(MSG_AWARENESS, update));
   }
 
-  async broadcastAwareness(update: Uint8Array): Promise<void> {
-    const { compressed, isCompressed } = await compressData(update, this.logger);
-    const message = JSON.stringify({
-      type: "awareness",
-      update: Array.from(compressed),
-      compressed: isCompressed,
-    });
-    this.sendToAllPeers(message);
-  }
-
-  private handleChunkedMessage(
-    peerId: string,
-    message: {
-      messageId: string;
-      chunk: number;
-      totalChunks: number;
-      update: number[];
+  private onAwarenessUpdate = (
+    { added, updated, removed }: { added: number[]; updated: number[]; removed: number[] },
+    origin: unknown
+  ) => {
+    if (!(origin instanceof RemoteOrigin)) return;
+    let clients = this.awarenessClientsByPeer.get(origin.peerId);
+    if (!clients) {
+      clients = new Set();
+      this.awarenessClientsByPeer.set(origin.peerId, clients);
     }
-  ): void {
-    const { chunk, totalChunks, update } = message;
+    for (const id of added) clients.add(id);
+    for (const id of updated) clients.add(id);
+    for (const id of removed) clients.delete(id);
+  };
 
-    if (!this.chunkBuffers.has(peerId)) {
-      this.chunkBuffers.set(peerId, new Map());
-    }
-    const peerBuffer = this.chunkBuffers.get(peerId)!;
+  private removePeerAwareness(peerId: string): void {
+    const clients = this.awarenessClientsByPeer.get(peerId);
+    this.awarenessClientsByPeer.delete(peerId);
+    if (!clients) return;
 
-    if (!peerBuffer.has(chunk)) {
-      peerBuffer.set(chunk, { chunk: update, totalChunks });
-    }
-
-    if (peerBuffer.size === totalChunks) {
-      const completeUpdate: number[] = [];
-      for (let i = 0; i < totalChunks; i++) {
-        const chunkData = peerBuffer.get(i);
-        if (chunkData) completeUpdate.push(...chunkData.chunk);
-      }
-      Y.applyUpdate(this.ydoc, new Uint8Array(completeUpdate), this);
-      peerBuffer.clear();
+    const stillReachable = new Set<number>([this.ydoc.clientID]);
+    this.awarenessClientsByPeer.forEach((ids) => ids.forEach((id) => stillReachable.add(id)));
+    const stale = Array.from(clients).filter((id) => !stillReachable.has(id));
+    if (stale.length > 0) {
+      removeAwarenessStates(this.awareness, stale, "peer-left");
     }
   }
-
 }
 
 // ICE gathering can take tens of seconds to complete when a STUN server is
