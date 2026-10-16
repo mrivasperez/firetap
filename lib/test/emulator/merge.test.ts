@@ -163,3 +163,32 @@ describe('merging the log into snapshots', () => {
     expect(text(again) === content).toBe(true)
   }, 120_000)
 })
+
+describe('merging during a session', () => {
+  beforeAll(() => setRules())
+  beforeEach(() => resetFakeWebRTC())
+  afterEach(() => open.splice(0).forEach((a) => a.disconnect()))
+
+  it('merges while clients stay open once their edits grow the log', async () => {
+    const basePath = uniqueBasePath('in-session')
+    const a = await openAdapter(basePath, { persistDebounceMs: 50 })
+    const b = await openAdapter(basePath, { persistDebounceMs: 50 })
+    await waitFor(() => a.getPeerCount() === 1, { message: 'connection' })
+
+    for (let i = 0; i < 30; i++) {
+      const writer = i % 2 ? a : b
+      writer.ydoc.getText('t').insert(text(writer).length, `${i}:${randomBytes(600).toString('hex')}\n`)
+      await new Promise((r) => setTimeout(r, 100))
+    }
+    await Promise.all([a.flush(), b.flush()])
+
+    await waitFor(async () => ((await readRaw(`${basePath}/doc/meta/generation`)) as number) >= 1, {
+      timeout: 20_000,
+      message: 'a merge during the session',
+    })
+    await waitFor(async () => (await storedDoc(`${basePath}/doc`)).getText('t').toString() === text(a), {
+      message: 'stored state matches',
+    })
+    expect(text(b)).toBe(text(a))
+  }, 40_000)
+})

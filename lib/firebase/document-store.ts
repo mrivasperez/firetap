@@ -26,6 +26,7 @@ import {
   MERGE_LEASE_MS,
   MERGE_MAX_LOG_BYTES,
   MERGE_MIN_LOG_BYTES,
+  MERGE_SETTLE_MS,
   PERSIST_RETRY_BASE_MS,
   PERSIST_RETRY_MAX_MS,
   RESCUE_JITTER_MS,
@@ -118,6 +119,9 @@ export class DocumentStore {
   private persistedClocks = new Map<number, number>();
   private rescueTimers = new Set<ReturnType<typeof setTimeout>>();
 
+  private logGrowth = 0;
+  private mergeTimer: ReturnType<typeof setTimeout> | null = null;
+  private inSessionMergeDisabled = false;
   private usedCache = false;
   private cacheDisabled = false;
   private knownKeys = new Set<string>();
@@ -208,24 +212,7 @@ export class DocumentStore {
         if (!snapshot) return null;
       }
 
-      const log = await get(ref(rtdb, paths.updates));
-      const entries = new Map<string, Uint8Array>();
-      let entryStoredBytes = 0;
-      const pending: Promise<void>[] = [];
-      log.forEach((child) => {
-        const entry = child.val() as StoredEntry | null;
-        const data = entryData(entry);
-        if (data === undefined) return;
-        if (data === null) throw new LoadError(`Malformed log entry ${child.key}`);
-        entryStoredBytes += data.length;
-        const bytes = base64ToUint8Array(data);
-        pending.push(
-          (entry!.gz ? decompressBytes(bytes) : Promise.resolve(bytes)).then((b) => {
-            entries.set(child.key!, b);
-          })
-        );
-      });
-      await Promise.all(pending);
+      const { entries, entryStoredBytes } = await this.readLog();
 
       const after = readMeta(await get(ref(rtdb, paths.meta)));
       if (after.generation !== meta.generation) return null;
@@ -244,19 +231,43 @@ export class DocumentStore {
     }
   }
 
+  private async readLog(): Promise<{ entries: Map<string, Uint8Array>; entryStoredBytes: number }> {
+    const log = await get(ref(this.opts.rtdb, this.opts.paths.updates));
+    const entries = new Map<string, Uint8Array>();
+    let entryStoredBytes = 0;
+    const pending: Promise<void>[] = [];
+    log.forEach((child) => {
+      const entry = child.val() as StoredEntry | null;
+      const data = entryData(entry);
+      if (data === undefined) return;
+      if (data === null) throw new LoadError(`Malformed log entry ${child.key}`);
+      entryStoredBytes += data.length;
+      const bytes = base64ToUint8Array(data);
+      pending.push(
+        (entry!.gz ? decompressBytes(bytes) : Promise.resolve(bytes)).then((b) => {
+          entries.set(child.key!, b);
+        })
+      );
+    });
+    await Promise.all(pending);
+    return { entries, entryStoredBytes };
+  }
+
+  private mergeThreshold(base: Base): number {
+    // Every load downloads the whole log while a merge downloads it once, so merge early.
+    return Math.max(MERGE_MIN_LOG_BYTES, Math.min(MERGE_MAX_LOG_BYTES, base.snapshotStoredBytes / 4));
+  }
+
   shouldMerge(): boolean {
     const base = this.base;
     if (!base || base.entries.size === 0) return false;
-    const threshold = Math.max(
-      MERGE_MIN_LOG_BYTES,
-      Math.min(MERGE_MAX_LOG_BYTES, base.snapshotStoredBytes / 2)
-    );
-    return base.entryStoredBytes > threshold;
+    return base.entryStoredBytes > this.mergeThreshold(base);
   }
 
-  merge(): Promise<boolean> {
+  /** Pass refreshLog to merge everything in the log now, not just what was loaded. */
+  merge({ refreshLog = false }: { refreshLog?: boolean } = {}): Promise<boolean> {
     if (!this.merging) {
-      this.merging = this.doMerge().finally(() => {
+      this.merging = this.doMerge(refreshLog).finally(() => {
         this.merging = null;
       });
     }
@@ -292,9 +303,9 @@ export class DocumentStore {
     this.opts.cache?.put({ snapshotKey, storedBytes, snapshot }).catch(() => {});
   }
 
-  private async doMerge(): Promise<boolean> {
+  private async doMerge(refreshLog: boolean): Promise<boolean> {
     const base = this.base;
-    if (!base || base.entries.size === 0) return false;
+    if (!base || (!refreshLog && base.entries.size === 0)) return false;
     const { rtdb, paths, peerId, logger } = this.opts;
     if (base.snapshotKey && !base.snapshot) {
       // Peers gave us this snapshot's content, but a merge must start from stored bytes.
@@ -316,11 +327,17 @@ export class DocumentStore {
     });
     if (!leased.committed || readMeta(leased.snapshot).lease?.holder !== peerId) return false;
 
+    // Holding the lease, nobody else can delete entries while we read them.
+    const entries = refreshLog ? (await this.readLog()).entries : base.entries;
+    if (entries.size === 0) {
+      await runTransaction(metaRef, (current) =>
+        current === null ? null : { ...readMetaValue(current), lease: null }
+      );
+      return false;
+    }
+
     // Store the smaller of the merged updates and the re-encoded state (no deleted content).
-    const merged = Y.mergeUpdates([
-      ...(base.snapshot ? [base.snapshot] : []),
-      ...base.entries.values(),
-    ]);
+    const merged = Y.mergeUpdates([...(base.snapshot ? [base.snapshot] : []), ...entries.values()]);
     const scratch = new Y.Doc();
     Y.applyUpdate(scratch, merged);
     const reencoded = Y.encodeStateAsUpdate(scratch);
@@ -371,7 +388,7 @@ export class DocumentStore {
 
     // Delete exactly the keys read; entries written since are kept.
     const cleanup: Record<string, null> = {};
-    base.entries.forEach((_bytes, key) => (cleanup[key] = null));
+    entries.forEach((_bytes, key) => (cleanup[key] = null));
     await update(ref(rtdb, paths.updates), cleanup).catch((error) =>
       logger.warn("Merged, but failed to delete merged log entries:", error)
     );
@@ -391,7 +408,7 @@ export class DocumentStore {
       entryStoredBytes: 0,
     });
     logger.debug(
-      `Merged ${base.entries.size} log entries into snapshot generation ${newGeneration}`
+      `Merged ${entries.size} log entries into snapshot generation ${newGeneration}`
     );
     this.opts.onMerged?.(newGeneration);
     return true;
@@ -429,6 +446,8 @@ export class DocumentStore {
     this.debounceTimer = this.retryTimer = null;
     this.rescueTimers.forEach((timer) => clearTimeout(timer));
     this.rescueTimers.clear();
+    if (this.mergeTimer) clearTimeout(this.mergeTimer);
+    this.mergeTimer = null;
     this.stopLogListener();
   }
 
@@ -494,8 +513,34 @@ export class DocumentStore {
     }
   }
 
+  // Every edit, from anyone, ends up in the log, so the edits we see estimate its growth.
+  private maybeScheduleMerge(): void {
+    const base = this.base;
+    if (!this.running || this.mergeTimer || this.inSessionMergeDisabled || !base) return;
+    const estimatedLog = base.entryStoredBytes + (this.logGrowth * 4) / 3;
+    if (estimatedLog <= this.mergeThreshold(base)) return;
+    this.mergeTimer = setTimeout(() => {
+      this.mergeTimer = null;
+      const current = this.base;
+      // Downloading a newer snapshot just to merge would cost more than it saves.
+      if (!current || (current.snapshotKey && !current.snapshot)) {
+        this.inSessionMergeDisabled = true;
+        return;
+      }
+      this.merge({ refreshLog: true })
+        .then((merged) => {
+          if (!merged) this.inSessionMergeDisabled = true;
+        })
+        .catch((error) => {
+          this.inSessionMergeDisabled = true;
+          this.opts.logger.warn("Failed to merge the log:", error);
+        });
+    }, MERGE_SETTLE_MS);
+  }
+
   private setBase(base: Base): void {
     const changed = base.generation !== this.base?.generation;
+    this.logGrowth = 0;
     this.base = base;
     if (changed) this.opts.onGenerationChange?.(base.generation);
   }
@@ -572,6 +617,8 @@ export class DocumentStore {
   }
 
   private onUpdate = (update: Uint8Array, origin: unknown) => {
+    this.logGrowth += update.length;
+    this.maybeScheduleMerge();
     if (origin === FIREBASE_ORIGIN || this.opts.isRemoteOrigin(origin)) return;
     this.queue.push(update);
     if (!this.inFlight) this.setState("unsaved");

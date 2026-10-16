@@ -21,9 +21,10 @@ export const RESCUE_JITTER_MS = 3_000;
 // Firebase rejects strings over 10MB.
 export const STORED_PART_CHARS = 8 * 1024 * 1024;
 export const LOG_ENTRY_GZIP_MIN_BYTES = 1024;
-export const MERGE_MIN_LOG_BYTES = 16 * 1024;
+export const MERGE_MIN_LOG_BYTES = 8 * 1024;
 export const MERGE_MAX_LOG_BYTES = 256 * 1024;
 export const MERGE_LEASE_MS = 60_000;
+export const MERGE_SETTLE_MS = 5_000;
 export const LOAD_MAX_ATTEMPTS = 3;
 
 export const AWARENESS_THROTTLE_MS = 50;
