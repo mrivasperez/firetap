@@ -41,6 +41,7 @@ import {
   ICE_GATHERING_MAX_MS,
   ICE_SETTLE_MS,
   ANTI_ENTROPY_INTERVAL_MS,
+  ISOLATION_DELAY_MS,
   DEFAULT_MAX_DIRECT_PEERS,
   TOPOLOGY_SETTLE_MS,
 } from "../utils/constants";
@@ -80,6 +81,8 @@ export type PeerManagerOptions = {
   onPageHidden?: () => void;
   onPersisted?: (clientId: number, clock: number) => void;
   onPeerGone?: (clientIds: number[]) => void;
+  /** Called with true when others are present but none has been reachable for a while. */
+  onIsolationChange?: (isolated: boolean) => void;
 };
 
 export class SimplePeerManager {
@@ -108,6 +111,8 @@ export class SimplePeerManager {
   private retryTimers = new Map<string, Timer>();
   private retryAttempts = new Map<string, number>();
   private reconcileTimer: Timer | null = null;
+  private isolated = false;
+  private isolationTimer: Timer | null = null;
   private desiredCache: Set<string> | null = null;
 
   private presentPeers = new Map<string, PresenceEntry>();
@@ -128,7 +133,7 @@ export class SimplePeerManager {
 
   private readonly hooks: Pick<
     PeerManagerOptions,
-    "onPageHidden" | "onPersisted" | "onPeerGone"
+    "onPageHidden" | "onPersisted" | "onPeerGone" | "onIsolationChange"
   >;
   // Who authored each Yjs client, from awareness and save reports.
   private clientToPeer = new Map<number, string>();
@@ -223,6 +228,7 @@ export class SimplePeerManager {
         this.presentPeers.set(otherPeerId, snapshot.val() as PresenceEntry);
         this.desiredCache = null;
         this.scheduleReconcile();
+        this.updateIsolation();
       })
     );
     this.unsubscribers.push(
@@ -241,6 +247,7 @@ export class SimplePeerManager {
           this.cleanupPeerConnection(otherPeerId);
         }
         this.scheduleReconcile();
+        this.updateIsolation();
       })
     );
 
@@ -275,6 +282,7 @@ export class SimplePeerManager {
       this.cleanupPeerConnection(peerId);
     }
     this.presentPeers.clear();
+    this.updateIsolation();
 
     // onDisconnect stays registered in case this write doesn't reach the server.
     const peerRef = this.presenceRef();
@@ -599,6 +607,7 @@ export class SimplePeerManager {
     this.removePeerAwareness(otherPeerId);
     this.neighborsOf.delete(otherPeerId);
     if (current && this.running) this.announceNeighbors();
+    this.updateIsolation();
 
     if (entry?.wasConnected) {
       this.emit("peer-left", { peerId: otherPeerId });
@@ -725,6 +734,7 @@ export class SimplePeerManager {
       }
       session.flush();
       this.announceNeighbors();
+      this.updateIsolation();
     };
 
     channel.onmessage = (event) => session.receive(event.data as ArrayBuffer);
@@ -846,6 +856,28 @@ export class SimplePeerManager {
       JSON.stringify({ peer, client: clientId, clock })
     );
     for (const [, session] of this.openSessions()) session.send(MSG_PERSISTED, payload);
+  }
+
+  private updateIsolation(): void {
+    const cutOff =
+      this.running && this.presentPeers.size > 0 && this.openSessions().length === 0;
+    if (!cutOff) {
+      if (this.isolationTimer) clearTimeout(this.isolationTimer);
+      this.isolationTimer = null;
+      if (this.isolated) {
+        this.isolated = false;
+        this.hooks.onIsolationChange?.(false);
+      }
+      return;
+    }
+    if (this.isolated || this.isolationTimer) return;
+    this.isolationTimer = setTimeout(() => {
+      this.isolationTimer = null;
+      if (this.running && this.presentPeers.size > 0 && this.openSessions().length === 0) {
+        this.isolated = true;
+        this.hooks.onIsolationChange?.(true);
+      }
+    }, ISOLATION_DELAY_MS);
   }
 
   private reportPeerGone(peerId: string): void {

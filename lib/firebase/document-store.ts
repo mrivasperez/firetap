@@ -2,12 +2,17 @@ import * as Y from "yjs";
 import type { Database, DataSnapshot } from "firebase/database";
 import {
   get,
+  onChildAdded,
+  onChildChanged,
   onValue,
+  orderByKey,
   push,
+  query,
   ref,
   remove,
   runTransaction,
   set,
+  startAfter,
   update,
 } from "firebase/database";
 import { base64ToUint8Array, uint8ArrayToBase64 } from "../utils/base64";
@@ -110,6 +115,10 @@ export class DocumentStore {
   private persistedClocks = new Map<number, number>();
   private rescueTimers = new Set<ReturnType<typeof setTimeout>>();
 
+  private knownKeys = new Set<string>();
+  private latestKey: string | null = null;
+  private stopListening: (() => void) | null = null;
+
   constructor(options: DocumentStoreOptions) {
     this.opts = {
       ...options,
@@ -148,6 +157,7 @@ export class DocumentStore {
       }
     }
     this.base = base;
+    base.entries.forEach((_bytes, key) => this.rememberKey(key));
 
     // Everything just loaded is saved.
     Y.decodeStateVector(Y.encodeStateVector(this.opts.ydoc)).forEach((clock, client) =>
@@ -355,6 +365,74 @@ export class DocumentStore {
     this.debounceTimer = this.retryTimer = null;
     this.rescueTimers.forEach((timer) => clearTimeout(timer));
     this.rescueTimers.clear();
+    this.stopLogListener();
+  }
+
+  get isListeningToLog(): boolean {
+    return this.stopListening !== null;
+  }
+
+  // Only for clients that can't reach any peer: every client downloading every
+  // edit would cost far more than syncing peer to peer.
+  async startLogListener(): Promise<void> {
+    if (this.stopListening || !this.running || !this.base) return;
+    const { rtdb, paths, logger } = this.opts;
+    this.stopListening = () => {};
+
+    const meta = readMeta(await get(ref(rtdb, paths.meta)));
+    if (meta.generation !== this.base.generation) {
+      // A merge may have deleted entries we never saw; they're in the new snapshot.
+      const base = await this.readBase();
+      if (base) {
+        const updates = [...(base.snapshot ? [base.snapshot] : []), ...base.entries.values()];
+        Y.applyUpdate(this.opts.ydoc, Y.mergeUpdates(updates), FIREBASE_ORIGIN);
+        this.base = base;
+        base.entries.forEach((_bytes, key) => this.rememberKey(key));
+      }
+    }
+    if (!this.running || !this.stopListening) return;
+
+    const log = this.latestKey
+      ? query(ref(rtdb, paths.updates), orderByKey(), startAfter(this.latestKey))
+      : ref(rtdb, paths.updates);
+    const onEntry = (child: DataSnapshot) => {
+      this.applyLogEntry(child).catch((error) =>
+        logger.warn(`Failed to apply log entry ${child.key}:`, error)
+      );
+    };
+    const unsubscribers = [onChildAdded(log, onEntry), onChildChanged(log, onEntry)];
+    this.stopListening = () => unsubscribers.forEach((unsubscribe) => unsubscribe());
+    logger.debug("No peer is reachable; receiving edits from Firebase");
+  }
+
+  stopLogListener(): void {
+    if (!this.stopListening) return;
+    this.stopListening();
+    this.stopListening = null;
+    this.opts.logger.debug("Stopped receiving edits from Firebase");
+  }
+
+  private async applyLogEntry(child: DataSnapshot): Promise<void> {
+    const key = child.key!;
+    if (this.knownKeys.has(key)) return;
+    const entry = child.val() as StoredEntry | null;
+    const data = entryData(entry);
+    if (data === undefined) return;
+    if (data === null) throw new Error("malformed entry");
+    this.rememberKey(key);
+    if (entry!.by === this.opts.peerId) return;
+    const stored = base64ToUint8Array(data);
+    const update = entry!.gz ? await decompressBytes(stored) : stored;
+    Y.applyUpdate(this.opts.ydoc, update, FIREBASE_ORIGIN);
+    if (this.base) {
+      this.base.entries.set(key, update);
+      this.base.entryStoredBytes += data.length;
+    }
+  }
+
+  private rememberKey(key: string): void {
+    this.knownKeys.add(key);
+    if (!this.latestKey || key > this.latestKey) this.latestKey = key;
   }
 
   flush(): Promise<void> {
@@ -488,6 +566,7 @@ export class DocumentStore {
     }
     const data = uint8ArrayToBase64(bytes);
     const entryRef = push(ref(rtdb, paths.updates));
+    this.rememberKey(entryRef.key!);
     const header = { by: peerId, ...(gz ? { gz: 1 as const } : {}) };
 
     if (data.length <= STORED_PART_CHARS) {

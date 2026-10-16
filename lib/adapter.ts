@@ -29,6 +29,7 @@ export async function createFirebaseYWebrtcAdapter(
     persistDebounceMs,
     maxDirectPeers = DEFAULT_MAX_DIRECT_PEERS,
     databasePaths,
+    firebaseFallback = "auto",
     logger: loggerOption,
   } = opts;
   const logger = resolveLogger(loggerOption);
@@ -60,6 +61,16 @@ export async function createFirebaseYWebrtcAdapter(
     },
     onPersisted: (clientId, clock) => store.current?.notePersisted(clientId, clock),
     onPeerGone: (clientIds) => store.current?.rescue(clientIds),
+    onIsolationChange: (isolated) => {
+      if (firebaseFallback === "off") return;
+      if (isolated) {
+        store.current?.startLogListener().catch((error) =>
+          logger.warn("Failed to listen for edits in Firebase:", error)
+        );
+      } else {
+        store.current?.stopLogListener();
+      }
+    },
   });
 
   const documentStore = new DocumentStore({

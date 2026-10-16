@@ -15,6 +15,8 @@ export type AdapterOptions = {
   // Direct WebRTC links per peer (default 6); larger rooms relay through peers.
   maxDirectPeers?: number;
   databasePaths?: DatabasePathsConfig;
+  // "auto" (default): when no peer is reachable, receive edits from Firebase instead.
+  firebaseFallback?: "auto" | "off";
   logger?: Partial<Logger>;
 };
 
