@@ -18,6 +18,13 @@ import {
 } from "./utils/constants";
 import { resolveLogger } from "./utils/logger";
 import { buildDatabasePaths, validateDocId } from "./utils/config";
+import { SnapshotCache } from "./utils/snapshot-cache";
+import type { Database } from "firebase/database";
+
+function cacheKey(db: Database, snapshotsPath: string): string {
+  const { databaseURL, projectId } = db.app.options;
+  return `${databaseURL ?? projectId ?? "default"}|${snapshotsPath}`;
+}
 
 export async function createFirebaseYWebrtcAdapter(
   opts: AdapterOptions
@@ -31,6 +38,7 @@ export async function createFirebaseYWebrtcAdapter(
     maxDirectPeers = DEFAULT_MAX_DIRECT_PEERS,
     databasePaths,
     firebaseFallback = "auto",
+    localCache = true,
     logger: loggerOption,
   } = opts;
   const logger = resolveLogger(loggerOption);
@@ -88,6 +96,7 @@ export async function createFirebaseYWebrtcAdapter(
     onMerged: (generation) =>
       peerManager.emit("document-persisted", { docId, version: generation }),
     onGenerationChange: (generation) => peerManager.setKnownGeneration(generation),
+    cache: localCache ? new SnapshotCache(cacheKey(firebaseDatabase, paths.snapshots)) : null,
   });
 
   awareness.setLocalStateField("user", { name: peerInfo.name, id: peerId });
@@ -99,7 +108,7 @@ export async function createFirebaseYWebrtcAdapter(
     // so we only download the log.
     const meta = await documentStore.fetchMeta();
     let haveGeneration: number | undefined;
-    if (meta.snapshot) {
+    if (meta.snapshot && !(await documentStore.hasCachedSnapshot(meta))) {
       await peerManager.start();
       if (await peerManager.waitForPeerSync(meta.generation, PEER_LOAD_TIMEOUT_MS)) {
         haveGeneration = meta.generation;

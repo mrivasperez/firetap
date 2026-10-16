@@ -18,6 +18,7 @@ import {
 import { base64ToUint8Array, uint8ArrayToBase64 } from "../utils/base64";
 import { compressBytes, decompressBytes } from "../utils/compression";
 import { defaultLogger, type Logger } from "../utils/logger";
+import type { SnapshotCache } from "../utils/snapshot-cache";
 import {
   DEFAULT_PERSIST_DEBOUNCE_MS,
   LOAD_MAX_ATTEMPTS,
@@ -85,6 +86,7 @@ export type DocumentStoreOptions = {
   onPersisted?: (clientId: number, clock: number) => void;
   onMerged?: (generation: number) => void;
   onGenerationChange?: (generation: number) => void;
+  cache?: SnapshotCache | null;
 };
 
 // Merges use only what was read from Firebase, never the live document.
@@ -116,6 +118,8 @@ export class DocumentStore {
   private persistedClocks = new Map<number, number>();
   private rescueTimers = new Set<ReturnType<typeof setTimeout>>();
 
+  private usedCache = false;
+  private cacheDisabled = false;
   private knownKeys = new Set<string>();
   private latestKey: string | null = null;
   private stopListening: (() => void) | null = null;
@@ -150,6 +154,22 @@ export class DocumentStore {
 
   /** Pass the snapshot generation peers have already synced to us to skip downloading it. */
   async load({ haveGeneration }: { haveGeneration?: number } = {}): Promise<void> {
+    try {
+      await this.loadOnce(haveGeneration);
+    } catch (error) {
+      if (!(error instanceof LoadError) || !this.usedCache) throw error;
+      this.opts.logger.warn("The cached snapshot was unreadable; downloading it instead");
+      await this.opts.cache?.delete();
+      this.cacheDisabled = true;
+      await this.loadOnce(haveGeneration);
+    }
+  }
+
+  async hasCachedSnapshot(meta: DocumentMeta): Promise<boolean> {
+    return (await this.cachedSnapshot(meta)) !== null;
+  }
+
+  private async loadOnce(haveGeneration?: number): Promise<void> {
     let base: Base | null = null;
     for (let attempt = 1; !base; attempt++) {
       base = await this.readBase(attempt === 1 ? haveGeneration : undefined);
@@ -184,7 +204,7 @@ export class DocumentStore {
       let snapshot: Uint8Array | null = null;
       let snapshotStoredBytes = meta.bytes;
       if (meta.snapshot && meta.generation !== haveGeneration) {
-        snapshot = await this.downloadSnapshot(meta);
+        snapshot = await this.snapshotFor(meta);
         if (!snapshot) return null;
       }
 
@@ -244,11 +264,32 @@ export class DocumentStore {
   }
 
   /** Null if that snapshot is gone, i.e. a merge replaced it. */
-  private async downloadSnapshot(meta: DocumentMeta): Promise<Uint8Array | null> {
+  private async snapshotFor(meta: DocumentMeta): Promise<Uint8Array | null> {
+    const cached = await this.cachedSnapshot(meta);
+    if (cached) {
+      this.usedCache = true;
+      this.opts.logger.debug("Loaded the snapshot from the local cache");
+      return cached;
+    }
     const stored = await get(ref(this.opts.rtdb, `${this.opts.paths.snapshots}/${meta.snapshot}`));
     const parts = stored.exists() ? partsOf(stored.val()) : null;
     if (!parts || parts.length !== meta.parts) return null;
-    return decompressBytes(base64ToUint8Array(parts.join("")));
+    const snapshot = await decompressBytes(base64ToUint8Array(parts.join("")));
+    this.cacheSnapshot(meta.snapshot!, meta.bytes, snapshot);
+    return snapshot;
+  }
+
+  private async cachedSnapshot(meta: DocumentMeta): Promise<Uint8Array | null> {
+    if (!this.opts.cache || this.cacheDisabled || !meta.snapshot) return null;
+    const cached = await this.opts.cache.get();
+    return cached?.snapshotKey === meta.snapshot && cached.storedBytes === meta.bytes
+      ? cached.snapshot
+      : null;
+  }
+
+  private cacheSnapshot(snapshotKey: string, storedBytes: number, snapshot: Uint8Array): void {
+    if (this.cacheDisabled) return;
+    this.opts.cache?.put({ snapshotKey, storedBytes, snapshot }).catch(() => {});
   }
 
   private async doMerge(): Promise<boolean> {
@@ -259,7 +300,7 @@ export class DocumentStore {
       // Peers gave us this snapshot's content, but a merge must start from stored bytes.
       const meta = await this.fetchMeta();
       if (meta.generation !== base.generation) return false;
-      base.snapshot = await this.downloadSnapshot(meta);
+      base.snapshot = await this.snapshotFor(meta);
       if (!base.snapshot) return false;
     }
     const metaRef = ref(rtdb, paths.meta);
@@ -340,6 +381,7 @@ export class DocumentStore {
       );
     }
 
+    this.cacheSnapshot(snapshotKey, encoded.length, snapshot);
     this.setBase({
       generation: newGeneration,
       snapshotKey,

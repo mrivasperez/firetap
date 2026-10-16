@@ -17,6 +17,9 @@ export type AdapterOptions = {
   databasePaths?: DatabasePathsConfig;
   // "auto" (default): when no peer is reachable, receive edits from Firebase instead.
   firebaseFallback?: "auto" | "off";
+  // Keep the last downloaded snapshot in IndexedDB so reopening skips the download
+  // (default true). Turn off if document content mustn't stay on the device.
+  localCache?: boolean;
   logger?: Partial<Logger>;
 };
 
