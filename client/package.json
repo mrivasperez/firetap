@@ -17,7 +17,7 @@
     "@tiptap/react": "^3.6.6",
     "@tiptap/starter-kit": "^3.6.6",
     "@tiptap/y-tiptap": "^3.0.0",
-    "firebase": "^12.4.0",
+    "firebase": "^13.0.0",
     "firetap": "file:../lib",
     "lib0": "^0.2.114",
     "react": "^19.2.0",

@@ -7,6 +7,7 @@
 - `firetap/server`: `loadDocument()` and `updateDocument()` read and edit documents with the Firebase Admin SDK. People with the document open receive the server's edits within a few seconds.
 - `clearLocalCache()` deletes the documents cached in IndexedDB, e.g. when signing out.
 - `getPresentPeers()` and the `presence-changed` event list everyone who has the document open. `peer-joined` and `peer-left` only cover direct WebRTC connections.
+- Works with Firebase 13 as well as 12.
 - `maxDirectPeers: 0` turns WebRTC off, so edits are exchanged through Firebase only, e.g. in tests. Peers that use WebRTC don't try to connect to such a client.
 
 ### Fixes
