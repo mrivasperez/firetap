@@ -12,6 +12,7 @@
 ### Fixes
 
 - A collaborator who can't connect to anyone over WebRTC is no longer invisible to the others. Peers that are connected to each other now also receive edits through Firebase while someone present is unreachable; one peer in each connected group downloads them and relays them to the rest.
+- A collaborator's cursor disappears as soon as they close the document, instead of sometimes lingering for 30 seconds.
 
 ## 1.0.0-beta.1
 

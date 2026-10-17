@@ -1069,15 +1069,21 @@ export class SimplePeerManager {
   };
 
   private removePeerAwareness(peerId: string): void {
-    const clients = this.awarenessClientsByPeer.get(peerId);
+    const clients = this.awarenessClientsByPeer.get(peerId) ?? new Set<number>();
     this.awarenessClientsByPeer.delete(peerId);
-    if (!clients) return;
 
     const stillReachable = new Set<number>([this.ydoc.clientID]);
     this.awarenessClientsByPeer.forEach((ids) => ids.forEach((id) => stillReachable.add(id)));
-    const stale = Array.from(clients).filter((id) => !stillReachable.has(id));
-    if (stale.length > 0) {
-      removeAwarenessStates(this.awareness, stale, "peer-left");
+    const stale = new Set(Array.from(clients).filter((id) => !stillReachable.has(id)));
+    // Other peers may have relayed this peer's own cursors to us, and they don't
+    // say when they stop. If it's still reachable through them, its next update returns.
+    this.awareness.getStates().forEach((_state, clientId) => {
+      if (clientId !== this.ydoc.clientID && this.clientToPeer.get(clientId) === peerId) {
+        stale.add(clientId);
+      }
+    });
+    if (stale.size > 0) {
+      removeAwarenessStates(this.awareness, Array.from(stale), "peer-left");
     }
   }
 }
