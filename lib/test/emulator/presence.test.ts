@@ -3,7 +3,7 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from
 import { createFirebaseYWebrtcAdapter } from '../../adapter'
 import type { AdapterHandle } from '../../core/types'
 import type { ConnectionState } from '../../utils/config'
-import { installFakeWebRTC, resetFakeWebRTC } from '../support/fake-webrtc'
+import { FakeRTCPeerConnection, installFakeWebRTC, resetFakeWebRTC } from '../support/fake-webrtc'
 import { closeClients, createClient, nestedPaths, readRaw, setRules, sleep, uniqueBasePath, waitFor } from './helpers'
 
 installFakeWebRTC()
@@ -44,6 +44,32 @@ describe('presence', () => {
     expect(entry).toEqual({ name: 'Bob', connectedAt: expect.any(Number) })
     await waitFor(() => joined.length === 1, { message: 'peer-joined' })
     expect(joined).toEqual(['Bob'])
+  })
+
+  it('lists everyone who has the document open, connected directly or not', async () => {
+    const basePath = uniqueBasePath('list')
+    const a = await openAdapter(basePath, 'Alice')
+    const reported: string[][] = []
+    a.on('presence-changed', ({ peers }) => reported.push(peers.map((p) => p.name).sort()))
+    const b = await openAdapter(basePath, 'Bob')
+    await waitFor(() => a.getPeerCount() === 1, { message: 'A and B connect' })
+
+    FakeRTCPeerConnection.isBlocked = () => true
+    const c = await openAdapter(basePath, 'Carol')
+    const names = (adapter: AdapterHandle) => adapter.getPresentPeers().map((p) => p.name).sort()
+    await waitFor(() => names(a).length === 2 && names(c).length === 2, { message: 'presence' })
+    expect(names(a)).toEqual(['Bob', 'Carol'])
+    expect(names(c)).toEqual(['Alice', 'Bob'])
+    expect(a.getPresentPeers().find((p) => p.name === 'Carol')).toEqual({
+      id: c.getUserInfo().id,
+      name: 'Carol',
+      connectedAt: expect.any(Number),
+    })
+
+    await c.disconnect()
+    await waitFor(() => names(a).length === 1, { message: 'Carol leaves' })
+    expect(reported).toEqual([['Bob'], ['Bob', 'Carol'], ['Bob']])
+    expect(b.getPresentPeers().map((p) => p.name)).toEqual(['Alice'])
   })
 
   it('is removed by Firebase when the connection drops, and restored on reconnect', async () => {
@@ -93,6 +119,7 @@ describe('presence', () => {
     goOffline(dbB)
     await waitFor(async () => (await readRaw(presencePath(basePath, b))) === null, { message: 'presence removal' })
     await sleep(300)
+    expect(a.getPresentPeers().map((p) => p.name)).toEqual(['Bob'])
     goOnline(dbB)
     await waitFor(async () => (await readRaw(presencePath(basePath, b))) !== null, { message: 're-announcement' })
 

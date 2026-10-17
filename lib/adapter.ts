@@ -113,7 +113,11 @@ export async function createFirebaseYWebrtcAdapter(
     // so we only download the log.
     const meta = await documentStore.fetchMeta();
     let haveGeneration: number | undefined;
-    if (meta.snapshot && !(await documentStore.hasCachedSnapshot(meta))) {
+    if (
+      meta.snapshot &&
+      peerManager.usesWebRTC &&
+      !(await documentStore.hasCachedSnapshot(meta))
+    ) {
       await peerManager.start();
       if (await peerManager.waitForPeerSync(meta.generation, PEER_LOAD_TIMEOUT_MS)) {
         haveGeneration = meta.generation;
@@ -233,6 +237,7 @@ export async function createFirebaseYWebrtcAdapter(
     disconnect,
     reconnect: () => peerManager.reconnect(),
     getPeerCount: () => peerManager.getPeerCount(),
+    getPresentPeers: () => peerManager.getPresentPeers(),
     getConnectionStatus: () => peerManager.getConnectionStatus(),
     getUserInfo: () => peerInfo,
     flush: () => documentStore.flush(),

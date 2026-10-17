@@ -120,7 +120,7 @@ async function signOut(adapter: AdapterHandle) {
 | `user` | `{ name: 'User-xxxxxx' }` | Shown to other collaborators. |
 | `peerId` | random UUID | Identifies this client. Must be unique per open document, so don't reuse a user id across tabs. |
 | `persistDebounceMs` | `1000` | How long local edits are batched before being written. |
-| `maxDirectPeers` | `6` | WebRTC connections per client. Larger rooms relay edits through other peers. |
+| `maxDirectPeers` | `6` | WebRTC connections per client. Larger rooms relay edits through other peers. `0` turns WebRTC off, e.g. in tests: edits are then exchanged through Firebase only, which downloads every edit. |
 | `firebaseFallback` | `'auto'` | If a collaborator can't be reached over WebRTC, exchange edits with them through Firebase. `'off'` disables it. |
 | `localCache` | `true` | Keep the last downloaded snapshot in IndexedDB so reopening skips the download. Turn off if document content must not stay on the device. |
 | `iceServers` | Google's public STUN servers | STUN and TURN servers for WebRTC. Add a TURN server so peers behind strict firewalls can connect. |
@@ -139,6 +139,7 @@ async function signOut(adapter: AdapterHandle) {
 | `getSaveState()` | `'saved'`, `'saving'`, `'unsaved'` or `'error'`. |
 | `getConnectionStatus()` | Firebase connection: `'connecting'`, `'connected'` or `'disconnected'`. |
 | `getPeerCount()` | Number of direct WebRTC connections. |
+| `getPresentPeers()` | Everyone else who has the document open, as `{ id, name, connectedAt }`, whether or not they're connected directly. |
 | `getUserInfo()` | This client's `{ id, name, connectedAt }`. |
 | `on(event, callback)`, `off(event, callback)` | Subscribe to events. |
 
@@ -149,6 +150,7 @@ async function signOut(adapter: AdapterHandle) {
 | `connection-state-changed` | `{ state }` | The Firebase connection goes up or down. |
 | `peer-joined` | `{ peerId, user }` | A direct WebRTC connection is established. |
 | `peer-left` | `{ peerId }` | A direct connection closed. |
+| `presence-changed` | `{ peers }` | Someone opened or closed the document; `peers` is the new `getPresentPeers()`. |
 | `sync-completed` | `{ docId, peerId, updateSize }` | The first sync with a newly connected peer finished. |
 | `save-state-changed` | `{ state }` | The save state changed. |
 | `persist-error` | `{ error }` | A write to Firebase failed (it will be retried). |

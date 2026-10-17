@@ -126,6 +126,9 @@ export class SimplePeerManager {
   private desiredCache: Set<string> | null = null;
 
   private presentPeers = new Map<string, PresenceEntry>();
+  // Kept while a peer is directly connected, through brief Firebase disconnects.
+  private peerInfos = new Map<string, PeerInfo>();
+  private reportedPresence = "";
 
   private peers = new Map<string, PeerConnectionEntry>();
   private sessions = new Map<
@@ -156,7 +159,8 @@ export class SimplePeerManager {
     this.awareness = options.awareness;
     this.rtdb = options.rtdb;
     this.databasePaths = options.databasePaths;
-    this.maxPeers = Math.max(2, options.maxDirectPeers ?? DEFAULT_MAX_DIRECT_PEERS);
+    const maxPeers = options.maxDirectPeers ?? DEFAULT_MAX_DIRECT_PEERS;
+    this.maxPeers = maxPeers === 0 ? 0 : Math.max(2, maxPeers);
     this.logger = options.logger ?? defaultLogger;
     this.iceServers = options.iceServers ?? [];
     this.hooks = options;
@@ -190,6 +194,10 @@ export class SimplePeerManager {
       ?.delete(callback as (data: AdapterEvents[keyof AdapterEvents]) => void);
   }
 
+  get usesWebRTC(): boolean {
+    return this.maxPeers > 0;
+  }
+
   private getPaths() {
     return buildDatabasePaths(this.databasePaths, this.docId);
   }
@@ -217,18 +225,20 @@ export class SimplePeerManager {
       })
     );
 
-    const signalingRef = ref(this.rtdb, `${paths.signaling}/${this.peerId}`);
-    this.unsubscribers.push(
-      onChildAdded(signalingRef, (snapshot) => {
-        if (runId !== this.runId) return;
-        this.handleSignalData(snapshot.val() as SignalData).catch((error) =>
-          this.logger.warn("Failed to handle signal:", error)
-        );
-        remove(snapshot.ref).catch((error) =>
-          this.logger.warn(`Failed to remove signal ${snapshot.key}:`, error)
-        );
-      })
-    );
+    if (this.usesWebRTC) {
+      const signalingRef = ref(this.rtdb, `${paths.signaling}/${this.peerId}`);
+      this.unsubscribers.push(
+        onChildAdded(signalingRef, (snapshot) => {
+          if (runId !== this.runId) return;
+          this.handleSignalData(snapshot.val() as SignalData).catch((error) =>
+            this.logger.warn("Failed to handle signal:", error)
+          );
+          remove(snapshot.ref).catch((error) =>
+            this.logger.warn(`Failed to remove signal ${snapshot.key}:`, error)
+          );
+        })
+      );
+    }
 
     const peersRef = ref(this.rtdb, `${paths.rooms}/peers`);
     this.unsubscribers.push(
@@ -236,10 +246,17 @@ export class SimplePeerManager {
         if (runId !== this.runId) return;
         const otherPeerId = snapshot.key!;
         if (otherPeerId === this.peerId) return;
-        this.presentPeers.set(otherPeerId, snapshot.val() as PresenceEntry);
+        const entry = snapshot.val() as PresenceEntry;
+        this.presentPeers.set(otherPeerId, entry);
+        this.peerInfos.set(otherPeerId, {
+          id: otherPeerId,
+          name: entry.name ?? `User-${otherPeerId.slice(0, PEER_ID_DISPLAY_LENGTH)}`,
+          connectedAt: typeof entry.connectedAt === "number" ? entry.connectedAt : Date.now(),
+        });
         this.desiredCache = null;
         this.scheduleReconcile();
         this.updateFallback();
+        this.reportPresence();
       })
     );
     this.unsubscribers.push(
@@ -259,6 +276,7 @@ export class SimplePeerManager {
         }
         this.scheduleReconcile();
         this.updateFallback();
+        this.reportPresence();
       })
     );
 
@@ -294,6 +312,7 @@ export class SimplePeerManager {
     }
     this.presentPeers.clear();
     this.updateFallback();
+    this.reportPresence();
 
     // onDisconnect stays registered in case this write doesn't reach the server.
     const peerRef = this.presenceRef();
@@ -326,6 +345,27 @@ export class SimplePeerManager {
       if (pc.connectionState === "connected") count++;
     });
     return count;
+  }
+
+  /** Everyone else who has the document open. */
+  getPresentPeers(): PeerInfo[] {
+    const ids = new Set(this.presentPeers.keys());
+    for (const [peerId] of this.openSessions()) ids.add(peerId);
+    return Array.from(ids)
+      .sort()
+      .flatMap((id) => this.peerInfos.get(id) ?? []);
+  }
+
+  private reportPresence(): void {
+    const peers = this.getPresentPeers();
+    const present = new Set(peers.map(({ id }) => id));
+    this.peerInfos.forEach((_info, id) => {
+      if (!present.has(id)) this.peerInfos.delete(id);
+    });
+    const key = Array.from(present).join(",");
+    if (key === this.reportedPresence) return;
+    this.reportedPresence = key;
+    this.emit("presence-changed", { peers });
   }
 
   getConnectionStatus(): ConnectionState {
@@ -392,6 +432,7 @@ export class SimplePeerManager {
       const entry: PresenceEntry = {
         name: this.peer.name,
         connectedAt: serverTimestamp(),
+        ...(this.usesWebRTC ? {} : { rtc: false as const }),
       };
       await set(peerRef, entry);
     } catch (error) {
@@ -402,11 +443,10 @@ export class SimplePeerManager {
 
   private desiredPeers(): Set<string> {
     if (!this.desiredCache) {
-      this.desiredCache = desiredNeighbors(
-        this.peerId,
-        this.presentPeers.keys(),
-        this.maxPeers
-      );
+      const candidates = Array.from(this.presentPeers)
+        .filter(([, entry]) => this.usesWebRTC && entry.rtc !== false)
+        .map(([peerId]) => peerId);
+      this.desiredCache = desiredNeighbors(this.peerId, candidates, this.maxPeers);
     }
     return this.desiredCache;
   }
@@ -534,18 +574,12 @@ export class SimplePeerManager {
         this.retryAttempts.delete(otherPeerId);
         if (!entry.wasConnected) {
           entry.wasConnected = true;
-          const presence = this.presentPeers.get(otherPeerId);
           this.emit("peer-joined", {
             peerId: otherPeerId,
-            user: {
+            user: this.peerInfos.get(otherPeerId) ?? {
               id: otherPeerId,
-              name:
-                presence?.name ??
-                `User-${otherPeerId.slice(0, PEER_ID_DISPLAY_LENGTH)}`,
-              connectedAt:
-                typeof presence?.connectedAt === "number"
-                  ? presence.connectedAt
-                  : Date.now(),
+              name: `User-${otherPeerId.slice(0, PEER_ID_DISPLAY_LENGTH)}`,
+              connectedAt: Date.now(),
             },
           });
         }
@@ -621,6 +655,7 @@ export class SimplePeerManager {
     this.neighborsOf.delete(otherPeerId);
     if (current && this.running) this.announceNeighbors();
     this.updateFallback();
+    this.reportPresence();
 
     if (entry?.wasConnected) {
       this.emit("peer-left", { peerId: otherPeerId });
@@ -933,34 +968,45 @@ export class SimplePeerManager {
     return reachable;
   }
 
+  // The present peers whose edits this client should receive through Firebase.
   // Edits from the log reach the rest of our group through us, so only the
   // group's smallest peer id needs to download them.
-  private needsFallback(): boolean {
-    if (!this.running) return false;
+  private fallbackPeers(): string[] {
+    if (!this.running) return [];
     const reachable = this.reachablePeers();
-    const someoneUnreachable = Array.from(this.presentPeers.keys()).some((id) => !reachable.has(id));
-    if (!someoneUnreachable) return false;
-    return !Array.from(reachable).some((id) => id < this.peerId && this.presentPeers.has(id));
+    if (Array.from(reachable).some((id) => id < this.peerId && this.presentPeers.has(id))) return [];
+    return Array.from(this.presentPeers.keys()).filter((id) => !reachable.has(id));
   }
 
   private updateFallback(): void {
-    if (!this.needsFallback()) {
+    const peers = this.fallbackPeers();
+    if (peers.length === 0) {
       if (this.fallbackTimer) clearTimeout(this.fallbackTimer);
       this.fallbackTimer = null;
-      if (this.fallbackActive) {
-        this.fallbackActive = false;
-        this.hooks.onFallbackChange?.(false);
-      }
+      this.setFallbackActive(false);
       return;
     }
-    if (this.fallbackActive || this.fallbackTimer) return;
+    if (this.fallbackActive) return;
+    const mayConnect =
+      this.usesWebRTC && peers.some((id) => this.presentPeers.get(id)?.rtc !== false);
+    if (!mayConnect) {
+      if (this.fallbackTimer) clearTimeout(this.fallbackTimer);
+      this.fallbackTimer = null;
+      this.setFallbackActive(true);
+      return;
+    }
+    if (this.fallbackTimer) return;
+    // Give WebRTC a chance to connect first.
     this.fallbackTimer = setTimeout(() => {
       this.fallbackTimer = null;
-      if (this.needsFallback()) {
-        this.fallbackActive = true;
-        this.hooks.onFallbackChange?.(true);
-      }
+      if (this.fallbackPeers().length > 0) this.setFallbackActive(true);
     }, FALLBACK_DELAY_MS);
+  }
+
+  private setFallbackActive(active: boolean): void {
+    if (this.fallbackActive === active) return;
+    this.fallbackActive = active;
+    this.hooks.onFallbackChange?.(active);
   }
 
   private reportPeerGone(peerId: string): void {
