@@ -427,8 +427,8 @@ export class DocumentStore {
     return this.stopListening !== null;
   }
 
-  // Only for clients that can't reach any peer: every client downloading every
-  // edit would cost far more than syncing peer to peer.
+  // Only while some collaborator can't be reached over WebRTC: every client
+  // downloading every edit would cost far more than syncing peer to peer.
   async startLogListener(): Promise<void> {
     const { db, paths, logger } = this.opts;
     if (this.stopListening || !this.running || !this.base || !db.watchChildren) return;
@@ -452,7 +452,7 @@ export class DocumentStore {
         logger.warn(`Failed to apply log entry ${key}:`, error)
       );
     });
-    logger.debug("No peer is reachable; receiving edits from Firebase");
+    logger.debug("Some collaborators are unreachable; receiving edits from Firebase");
   }
 
   stopLogListener(): void {

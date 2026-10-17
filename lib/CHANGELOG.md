@@ -6,6 +6,10 @@
 
 - `firetap/server`: `loadDocument()` and `updateDocument()` read and edit documents with the Firebase Admin SDK.
 
+### Fixes
+
+- A collaborator who can't connect to anyone over WebRTC is no longer invisible to the others. Peers that are connected to each other now also receive edits through Firebase while someone present is unreachable; one peer in each connected group downloads them and relays them to the rest.
+
 ## 1.0.0-beta.1
 
 This release reworks how documents are stored and synced. It isn't compatible with documents saved by the alpha releases.

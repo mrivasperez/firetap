@@ -107,7 +107,7 @@ A failed write is retried automatically; `persist-error` is emitted and the save
 | `peerId` | random UUID | Identifies this client. Must be unique per open document, so don't reuse a user id across tabs. |
 | `persistDebounceMs` | `1000` | How long local edits are batched before being written. |
 | `maxDirectPeers` | `6` | WebRTC connections per client. Larger rooms relay edits through other peers. |
-| `firebaseFallback` | `'auto'` | If no peer can be reached, receive others' edits from Firebase. `'off'` disables it. |
+| `firebaseFallback` | `'auto'` | If a collaborator can't be reached over WebRTC, exchange edits with them through Firebase. `'off'` disables it. |
 | `localCache` | `true` | Keep the last downloaded snapshot in IndexedDB so reopening skips the download. Turn off if document content must not stay on the device. |
 | `iceServers` | Google's public STUN servers | STUN and TURN servers for WebRTC. Add a TURN server so peers behind strict firewalls can connect. |
 | `databasePaths` | `/documents/{docId}/...` | Where data is stored; see [Database layout](#database-layout). |
@@ -240,7 +240,7 @@ To measure your own scenarios, see `bench/run.mjs` (`npm run bench:cost -w lib`)
 ## Limitations
 
 - **Offline edits are kept in memory only.** If a tab closes while it is offline and can't reach any peer, its unsaved edits are lost. `hasUnsavedChanges()` tells you when that could happen.
-- **WebRTC needs a network path.** Peers that can't connect directly need a TURN server (`iceServers`). Until then they still receive each other's edits through Firebase, with a few seconds' delay.
+- **WebRTC needs a network path.** Peers that can't connect directly need a TURN server (`iceServers`). Until then they still receive each other's edits through Firebase, with a few seconds' delay, but not each other's cursors.
 - **One client per peer ID.** Every open document needs its own `peerId`; the default is a fresh random ID.
 
 ## License

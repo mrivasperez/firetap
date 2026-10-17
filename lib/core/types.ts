@@ -15,7 +15,7 @@ export type AdapterOptions = {
   // Direct WebRTC links per peer (default 6); larger rooms relay through peers.
   maxDirectPeers?: number;
   databasePaths?: DatabasePathsConfig;
-  // "auto" (default): when no peer is reachable, receive edits from Firebase instead.
+  // "auto" (default): when a collaborator is unreachable over WebRTC, receive edits from Firebase.
   firebaseFallback?: "auto" | "off";
   // Keep the last downloaded snapshot in IndexedDB so reopening skips the download
   // (default true). Turn off if document content mustn't stay on the device.

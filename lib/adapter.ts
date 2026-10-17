@@ -75,9 +75,9 @@ export async function createFirebaseYWebrtcAdapter(
     },
     onPersisted: (clientId, clock) => store.current?.notePersisted(clientId, clock),
     onPeerGone: (clientIds) => store.current?.rescue(clientIds),
-    onIsolationChange: (isolated) => {
+    onFallbackChange: (active) => {
       if (firebaseFallback === "off") return;
-      if (isolated) {
+      if (active) {
         store.current?.startLogListener().catch((error) =>
           logger.warn("Failed to listen for edits in Firebase:", error)
         );

@@ -41,7 +41,7 @@ import {
   ICE_GATHERING_MAX_MS,
   ICE_SETTLE_MS,
   ANTI_ENTROPY_INTERVAL_MS,
-  ISOLATION_DELAY_MS,
+  FALLBACK_DELAY_MS,
   PRESENCE_SETTLE_MS,
   DEFAULT_MAX_DIRECT_PEERS,
   TOPOLOGY_SETTLE_MS,
@@ -84,8 +84,8 @@ export type PeerManagerOptions = {
   onPageHidden?: () => void;
   onPersisted?: (clientId: number, clock: number) => void;
   onPeerGone?: (clientIds: number[]) => void;
-  /** Called with true when others are present but none has been reachable for a while. */
-  onIsolationChange?: (isolated: boolean) => void;
+  /** Called with true when this client should receive edits from Firebase, because a present peer is unreachable. */
+  onFallbackChange?: (active: boolean) => void;
 };
 
 export class SimplePeerManager {
@@ -115,8 +115,8 @@ export class SimplePeerManager {
   private retryTimers = new Map<string, Timer>();
   private retryAttempts = new Map<string, number>();
   private reconcileTimer: Timer | null = null;
-  private isolated = false;
-  private isolationTimer: Timer | null = null;
+  private fallbackActive = false;
+  private fallbackTimer: Timer | null = null;
 
   // The snapshot generation our document contains, and what each peer reports.
   private knownGeneration = 0;
@@ -143,7 +143,7 @@ export class SimplePeerManager {
 
   private readonly hooks: Pick<
     PeerManagerOptions,
-    "onPageHidden" | "onPersisted" | "onPeerGone" | "onIsolationChange"
+    "onPageHidden" | "onPersisted" | "onPeerGone" | "onFallbackChange"
   >;
   // Who authored each Yjs client, from awareness and save reports.
   private clientToPeer = new Map<number, string>();
@@ -239,7 +239,7 @@ export class SimplePeerManager {
         this.presentPeers.set(otherPeerId, snapshot.val() as PresenceEntry);
         this.desiredCache = null;
         this.scheduleReconcile();
-        this.updateIsolation();
+        this.updateFallback();
       })
     );
     this.unsubscribers.push(
@@ -258,7 +258,7 @@ export class SimplePeerManager {
           this.cleanupPeerConnection(otherPeerId);
         }
         this.scheduleReconcile();
-        this.updateIsolation();
+        this.updateFallback();
       })
     );
 
@@ -293,7 +293,7 @@ export class SimplePeerManager {
       this.cleanupPeerConnection(peerId);
     }
     this.presentPeers.clear();
-    this.updateIsolation();
+    this.updateFallback();
 
     // onDisconnect stays registered in case this write doesn't reach the server.
     const peerRef = this.presenceRef();
@@ -620,7 +620,7 @@ export class SimplePeerManager {
     this.initiallySynced.delete(otherPeerId);
     this.neighborsOf.delete(otherPeerId);
     if (current && this.running) this.announceNeighbors();
-    this.updateIsolation();
+    this.updateFallback();
 
     if (entry?.wasConnected) {
       this.emit("peer-left", { peerId: otherPeerId });
@@ -748,7 +748,7 @@ export class SimplePeerManager {
       session.send(MSG_STATUS, this.statusPayload());
       session.flush();
       this.announceNeighbors();
-      this.updateIsolation();
+      this.updateFallback();
     };
 
     channel.onmessage = (event) => session.receive(event.data as ArrayBuffer);
@@ -923,26 +923,44 @@ export class SimplePeerManager {
     });
   }
 
-  private updateIsolation(): void {
-    const cutOff =
-      this.running && this.presentPeers.size > 0 && this.openSessions().length === 0;
-    if (!cutOff) {
-      if (this.isolationTimer) clearTimeout(this.isolationTimer);
-      this.isolationTimer = null;
-      if (this.isolated) {
-        this.isolated = false;
-        this.hooks.onIsolationChange?.(false);
+  // Peers whose cursors reach us, directly or relayed, are in sync with us.
+  private reachablePeers(): Set<string> {
+    const reachable = new Set(this.openSessions().map(([peerId]) => peerId));
+    this.awareness.getStates().forEach((state, clientId) => {
+      const peerId = (state as { firetap?: { peerId?: unknown } }).firetap?.peerId;
+      if (clientId !== this.ydoc.clientID && typeof peerId === "string") reachable.add(peerId);
+    });
+    return reachable;
+  }
+
+  // Edits from the log reach the rest of our group through us, so only the
+  // group's smallest peer id needs to download them.
+  private needsFallback(): boolean {
+    if (!this.running) return false;
+    const reachable = this.reachablePeers();
+    const someoneUnreachable = Array.from(this.presentPeers.keys()).some((id) => !reachable.has(id));
+    if (!someoneUnreachable) return false;
+    return !Array.from(reachable).some((id) => id < this.peerId && this.presentPeers.has(id));
+  }
+
+  private updateFallback(): void {
+    if (!this.needsFallback()) {
+      if (this.fallbackTimer) clearTimeout(this.fallbackTimer);
+      this.fallbackTimer = null;
+      if (this.fallbackActive) {
+        this.fallbackActive = false;
+        this.hooks.onFallbackChange?.(false);
       }
       return;
     }
-    if (this.isolated || this.isolationTimer) return;
-    this.isolationTimer = setTimeout(() => {
-      this.isolationTimer = null;
-      if (this.running && this.presentPeers.size > 0 && this.openSessions().length === 0) {
-        this.isolated = true;
-        this.hooks.onIsolationChange?.(true);
+    if (this.fallbackActive || this.fallbackTimer) return;
+    this.fallbackTimer = setTimeout(() => {
+      this.fallbackTimer = null;
+      if (this.needsFallback()) {
+        this.fallbackActive = true;
+        this.hooks.onFallbackChange?.(true);
       }
-    }, ISOLATION_DELAY_MS);
+    }, FALLBACK_DELAY_MS);
   }
 
   private reportPeerGone(peerId: string): void {
@@ -961,6 +979,7 @@ export class SimplePeerManager {
     { added, updated, removed }: { added: number[]; updated: number[]; removed: number[] },
     origin: unknown
   ) => {
+    if (added.length > 0 || removed.length > 0) this.updateFallback();
     if (!(origin instanceof RemoteOrigin)) return;
     for (const id of added.concat(updated)) {
       const author = (this.awareness.getStates().get(id) as { firetap?: { peerId?: unknown } } | undefined)
