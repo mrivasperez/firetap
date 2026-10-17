@@ -42,6 +42,7 @@ import {
   ICE_SETTLE_MS,
   ANTI_ENTROPY_INTERVAL_MS,
   FALLBACK_DELAY_MS,
+  FALLBACK_LINGER_MS,
   PRESENCE_SETTLE_MS,
   DEFAULT_MAX_DIRECT_PEERS,
   TOPOLOGY_SETTLE_MS,
@@ -117,6 +118,7 @@ export class SimplePeerManager {
   private reconcileTimer: Timer | null = null;
   private fallbackActive = false;
   private fallbackTimer: Timer | null = null;
+  private fallbackStopTimer: Timer | null = null;
 
   // The snapshot generation our document contains, and what each peer reports.
   private knownGeneration = 0;
@@ -353,6 +355,7 @@ export class SimplePeerManager {
     for (const [peerId] of this.openSessions()) ids.add(peerId);
     return Array.from(ids)
       .sort()
+      .filter((id) => !this.presentPeers.get(id)?.server)
       .flatMap((id) => this.peerInfos.get(id) ?? []);
   }
 
@@ -984,9 +987,19 @@ export class SimplePeerManager {
     if (peers.length === 0) {
       if (this.fallbackTimer) clearTimeout(this.fallbackTimer);
       this.fallbackTimer = null;
-      this.setFallbackActive(false);
+      if (!this.running) {
+        this.setFallbackActive(false);
+      } else if (this.fallbackActive && !this.fallbackStopTimer) {
+        // A server leaves right after writing; keep reading until its edits arrive.
+        this.fallbackStopTimer = setTimeout(() => {
+          this.fallbackStopTimer = null;
+          if (this.fallbackPeers().length === 0) this.setFallbackActive(false);
+        }, FALLBACK_LINGER_MS);
+      }
       return;
     }
+    if (this.fallbackStopTimer) clearTimeout(this.fallbackStopTimer);
+    this.fallbackStopTimer = null;
     if (this.fallbackActive) return;
     const mayConnect =
       this.usesWebRTC && peers.some((id) => this.presentPeers.get(id)?.rtc !== false);
@@ -1005,6 +1018,10 @@ export class SimplePeerManager {
   }
 
   private setFallbackActive(active: boolean): void {
+    if (!active && this.fallbackStopTimer) {
+      clearTimeout(this.fallbackStopTimer);
+      this.fallbackStopTimer = null;
+    }
     if (this.fallbackActive === active) return;
     this.fallbackActive = active;
     this.hooks.onFallbackChange?.(active);

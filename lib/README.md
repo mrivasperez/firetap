@@ -97,6 +97,27 @@ async function exportDocument() {
 
 A failed write is retried automatically; `persist-error` is emitted and the save state stays `'error'` until a retry succeeds.
 
+## Use a TURN server in production
+
+With only STUN servers (the default), peers can't connect directly when one of them is behind a strict NAT or a firewall that blocks UDP, which is common on corporate networks, VPNs and some mobile networks. Those peers still exchange edits through Firebase, a few seconds late and at a higher Firebase cost, and they don't see each other's cursors. A TURN server relays the connection instead:
+
+```ts
+import { getDatabase } from 'firebase/database'
+import { createFirebaseYWebrtcAdapter } from 'firetap'
+
+const adapter = await createFirebaseYWebrtcAdapter({
+  docId: 'my-document',
+  firebaseDatabase: getDatabase(),
+  iceServers: [
+    { urls: 'stun:stun.l.google.com:19302' },
+    // From a TURN provider (e.g. Cloudflare, Twilio) or your own coturn server.
+    { urls: 'turn:turn.example.com:3478', username: 'user', credential: 'secret' },
+  ],
+})
+```
+
+Most providers issue short-lived credentials from your backend; fetch them before opening the document.
+
 ## Signing out
 
 With `localCache` on, the last snapshot of each opened document stays in IndexedDB. `clearLocalCache()` deletes it for every document, in every tab:
@@ -180,10 +201,10 @@ console.log(ydoc.getText('notes').toString())
 ydoc.destroy()
 ```
 
-Both take `docId`, `database`, and optionally `databasePaths`, `logger` and `authorId` (stored as the author of the edits; default `server-<random id>`). They reject with `LoadError` if the document can't be read, and `updateDocument` then saves nothing.
+Both take `docId`, `database`, and optionally `databasePaths`, `logger`, `authorId` (stored as the author of the edits; default `server-<random id>`) and `authorName` (default `'Server'`). They reject with `LoadError` if the document can't be read, and `updateDocument` then saves nothing.
 
 - `updateDocument` isn't idempotent: running the same insert twice inserts the text twice. If a script may run again, check the document's content in the callback first.
-- People who have the document open receive the server's edits the next time they open it, not live.
+- People who have the document open receive the edits within a few seconds. While saving, the server adds itself to the document's presence list so their clients read the new edits from Firebase; it isn't included in `getPresentPeers()`.
 - The Admin SDK bypasses security rules.
 
 ## Database layout

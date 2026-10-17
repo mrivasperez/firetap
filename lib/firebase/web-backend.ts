@@ -1,6 +1,7 @@
 import type { Database, DataSnapshot } from "firebase/database";
 import {
   get,
+  onDisconnect,
   onChildAdded,
   onChildChanged,
   onValue,
@@ -27,6 +28,7 @@ export function webBackend(db: Database): DatabaseBackend {
     set: (path, value) => set(ref(db, path), value),
     update: (path, values) => update(ref(db, path), values),
     remove: (path) => remove(ref(db, path)),
+    removeOnDisconnect: (path) => onDisconnect(ref(db, path)).remove(),
     newKey: (path) => push(ref(db, path)).key!,
     transaction: async (path, apply) => {
       const result = await runTransaction(ref(db, path), apply);

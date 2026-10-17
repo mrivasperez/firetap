@@ -6,6 +6,8 @@ export type DatabaseBackend = {
   set(path: string, value: unknown): Promise<void>;
   update(path: string, values: Record<string, unknown>): Promise<void>;
   remove(path: string): Promise<void>;
+  /** Has Firebase remove path if this client's connection drops. */
+  removeOnDisconnect(path: string): Promise<void>;
   /** A new push key under path, generated locally. */
   newKey(path: string): string;
   /** Return undefined from apply to abort. */

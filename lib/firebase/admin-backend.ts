@@ -12,6 +12,7 @@ type AdminReference = {
   set(value: unknown): Promise<void>;
   update(values: object): Promise<void>;
   remove(): Promise<void>;
+  onDisconnect(): { remove(): Promise<void> };
   push(): { key: string | null };
   transaction(
     apply: (current: unknown) => unknown
@@ -34,6 +35,7 @@ export function adminBackend(db: AdminDatabase): DatabaseBackend {
     set: (path, value) => db.ref(path).set(value),
     update: (path, values) => db.ref(path).update(values),
     remove: (path) => db.ref(path).remove(),
+    removeOnDisconnect: (path) => db.ref(path).onDisconnect().remove(),
     newKey: (path) => db.ref(path).push().key!,
     transaction: async (path, apply) => {
       const result = await db.ref(path).transaction(apply);

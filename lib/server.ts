@@ -17,18 +17,26 @@ export type ServerDocumentOptions = {
   databasePaths?: DatabasePathsConfig;
   /** Stored as the author of the edits, in each log entry's `by` field. */
   authorId?: string;
+  /** Shown as the presence entry's name while saving (default "Server"). */
+  authorName?: string;
   logger?: Partial<Logger>;
 };
 
 function openStore(options: ServerDocumentOptions, ydoc: Y.Doc) {
   const logger = resolveLogger(options.logger);
+  const db = adminBackend(options.database);
+  const paths = buildDatabasePaths(options.databasePaths, options.docId);
+  const authorId = options.authorId ?? `server-${randomId()}`;
   return {
     logger,
+    presencePath: `${paths.rooms}/peers/${authorId}`,
+    db,
+    authorName: options.authorName ?? "Server",
     store: new DocumentStore({
-      db: adminBackend(options.database),
-      paths: buildDatabasePaths(options.databasePaths, options.docId),
+      db,
+      paths,
       ydoc,
-      peerId: options.authorId ?? `server-${randomId()}`,
+      peerId: authorId,
       logger,
       isRemoteOrigin: () => false,
     }),
@@ -57,12 +65,25 @@ export async function updateDocument(
   change: (ydoc: Y.Doc) => void | Promise<void>
 ): Promise<Y.Doc> {
   const ydoc = new Y.Doc();
-  const { store, logger } = openStore(options, ydoc);
+  const { store, logger, db, presencePath, authorName } = openStore(options, ydoc);
+  let announced = false;
   try {
     await store.load();
     store.start();
     await change(ydoc);
-    await store.flush();
+    if (store.hasUnsavedChanges()) {
+      // Open clients only read the log while someone present is unreachable,
+      // so being present makes them pick up these edits now.
+      await db.removeOnDisconnect(presencePath);
+      await db.set(presencePath, {
+        name: authorName,
+        connectedAt: { ".sv": "timestamp" },
+        rtc: false,
+        server: true,
+      });
+      announced = true;
+      await store.flush();
+    }
     // The log is already downloaded, so merging it costs no extra download.
     if (store.shouldMerge()) {
       await store.merge().catch((error) => logger.warn("Failed to merge the log:", error));
@@ -72,6 +93,11 @@ export async function updateDocument(
     throw error;
   } finally {
     store.stop();
+    if (announced) {
+      await db.remove(presencePath).catch((error) =>
+        logger.warn("Failed to remove the server's presence:", error)
+      );
+    }
   }
   return ydoc;
 }

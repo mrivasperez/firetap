@@ -14,6 +14,7 @@ import {
   readRaw,
   setRules,
   uniqueBasePath,
+  waitFor,
   writeRaw,
 } from './helpers'
 
@@ -81,6 +82,24 @@ describe('server entry', () => {
 
     const reader = await openAdapter(basePath)
     expect(reader.ydoc.getText('t').toString()).toBe('browser + server')
+  })
+
+  it('reaches people who have the document open, without appearing among them', async () => {
+    const basePath = uniqueBasePath('server-live')
+    const a = await openAdapter(basePath)
+    const b = await openAdapter(basePath)
+    await waitFor(() => a.getPeerCount() === 1 && b.getPeerCount() === 1, { message: 'A and B connect' })
+    const presenceEvents: number[] = []
+    a.on('presence-changed', ({ peers }) => presenceEvents.push(peers.length))
+
+    ;(await updateDocument(await serverOptions(basePath), (ydoc) => ydoc.getText('t').insert(0, 'live'))).destroy()
+
+    await waitFor(() => a.ydoc.getText('t').toString() === 'live' && b.ydoc.getText('t').toString() === 'live', {
+      message: 'server edit reaches A and B',
+    })
+    expect(Object.keys((await readRaw(`${basePath}/doc/rooms/peers`)) as object)).toHaveLength(2)
+    expect(presenceEvents).toEqual([])
+    expect(a.getPresentPeers()).toHaveLength(1)
   })
 
   it('merges a large log it loaded', async () => {

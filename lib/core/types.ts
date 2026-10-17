@@ -77,6 +77,7 @@ export type PresenceEntry = {
   name: string;
   connectedAt: number | object; // server timestamp
   rtc?: false; // WebRTC is turned off
+  server?: true; // firetap/server, present only while saving
 };
 
 export type SignalData = {
