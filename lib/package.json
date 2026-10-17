@@ -1,6 +1,6 @@
 {
   "name": "firetap",
-  "version": "1.0.0-beta.1",
+  "version": "1.0.0-beta.2",
   "description": "Real-time collaborative editing adapter for TipTap, Yjs, and Firebase Realtime Database",
   "main": "./dist/index.js",
   "module": "./dist/index.mjs",
