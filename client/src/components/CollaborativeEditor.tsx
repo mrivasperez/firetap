@@ -1,4 +1,4 @@
-import { useEffect, useState, useMemo } from 'react'
+import { useEffect, useState } from 'react'
 import { EditorContent, useEditor } from '@tiptap/react'
 import StarterKit from '@tiptap/starter-kit'
 import Collaboration from '@tiptap/extension-collaboration'
@@ -6,6 +6,7 @@ import CollaborationCaret from '@tiptap/extension-collaboration-caret'
 import { Placeholder } from '@tiptap/extensions'
 import { createFirebaseYWebrtcAdapter, type AdapterHandle } from 'firetap'
 import { rtdb } from '../firebase'
+import { generateRandomColor } from '../utils/color'
 import './CollaborativeEditor.css'
 
 type Props = { 
@@ -32,11 +33,8 @@ export default function CollaborativeEditor({
     isCommonClient: boolean
   } | null>(null)
 
-  // Generate stable user color (memoized to prevent regeneration on re-renders)
-  const stableUserColor = useMemo(() => 
-    userColor || `#${Math.floor(Math.random()*16777215).toString(16)}`,
-    [userColor]
-  )
+  const [randomColor] = useState(generateRandomColor)
+  const stableUserColor = userColor || randomColor
 
   // Create editor - with minimal config if adapter not ready
   const editor = useEditor({

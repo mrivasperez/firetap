@@ -40,5 +40,8 @@ jobs:
       - name: Emulator tests
         run: npm run test:emulator
 
+      - name: Lint demo client
+        run: npm run lint -w client
+
       - name: Build demo client
         run: npm run build -w client
