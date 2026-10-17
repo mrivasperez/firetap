@@ -775,6 +775,8 @@ export class SimplePeerManager {
       payload[0] = PROTOCOL_VERSION;
       payload.set(step1, 1);
       session.send(MSG_SYNC_STEP1, payload);
+      // Before awareness, so the peer doesn't relay our cursors to our own neighbors.
+      this.announceNeighbors();
 
       const clients = Array.from(this.awareness.getStates().keys());
       if (clients.length > 0) {
@@ -782,7 +784,6 @@ export class SimplePeerManager {
       }
       session.send(MSG_STATUS, this.statusPayload());
       session.flush();
-      this.announceNeighbors();
       this.updateFallback();
     };
 
