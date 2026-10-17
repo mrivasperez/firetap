@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+### New
+
+- `firetap/server`: `loadDocument()` and `updateDocument()` read and edit documents with the Firebase Admin SDK.
+
 ## 1.0.0-beta.1
 
 This release reworks how documents are stored and synced. It isn't compatible with documents saved by the alpha releases.

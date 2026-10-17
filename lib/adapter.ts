@@ -3,6 +3,7 @@ import { Awareness } from "y-protocols/awareness";
 import { encodeAwarenessUpdate } from "y-protocols/awareness";
 import { SimplePeerManager, RemoteOrigin } from "./core/peer-manager";
 import { DocumentStore } from "./firebase/document-store";
+import { webBackend } from "./firebase/web-backend";
 import type {
   AdapterOptions,
   AdapterEvents,
@@ -87,7 +88,7 @@ export async function createFirebaseYWebrtcAdapter(
   });
 
   const documentStore = new DocumentStore({
-    rtdb: firebaseDatabase,
+    db: webBackend(firebaseDatabase),
     paths,
     ydoc,
     peerId,

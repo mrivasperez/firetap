@@ -12,7 +12,7 @@ Real-time collaborative editing for [Yjs](https://docs.yjs.dev/) and [TipTap](ht
 npm install firetap yjs y-protocols firebase
 ```
 
-Firetap runs in the browser: it needs WebRTC, and uses `CompressionStream` and IndexedDB when they're available.
+Firetap runs in the browser: it needs WebRTC, and uses `CompressionStream` and IndexedDB when they're available. To read or edit documents from Node.js (20 or later) with the Admin SDK, see [On a server](#on-a-server).
 
 ## Quick start
 
@@ -140,6 +140,35 @@ A failed write is retried automatically; `persist-error` is emitted and the save
 | `persist-error` | `{ error }` | A write to Firebase failed (it will be retried). |
 | `document-persisted` | `{ docId, version }` | Recent edits were merged into a new stored snapshot. |
 | `error` | `{ error, context }` | Something else failed, e.g. announcing presence. |
+
+## On a server
+
+`firetap/server` reads and edits documents with the Firebase Admin SDK, for scripts and backends that create or change pages:
+
+```ts
+import { initializeApp } from 'firebase-admin/app'
+import { getDatabase } from 'firebase-admin/database'
+import { loadDocument, updateDocument } from 'firetap/server'
+
+initializeApp({ databaseURL: 'https://your-project-default-rtdb.firebaseio.com' })
+const database = getDatabase()
+
+// Creates the document if it doesn't exist. Only the edits made in the callback are saved.
+const updated = await updateDocument({ docId: 'my-document', database }, (ydoc) => {
+  ydoc.getText('notes').insert(0, 'Written by a script\n')
+})
+updated.destroy()
+
+const ydoc = await loadDocument({ docId: 'my-document', database })
+console.log(ydoc.getText('notes').toString())
+ydoc.destroy()
+```
+
+Both take `docId`, `database`, and optionally `databasePaths`, `logger` and `authorId` (stored as the author of the edits; default `server-<random id>`). They reject with `LoadError` if the document can't be read, and `updateDocument` then saves nothing.
+
+- `updateDocument` isn't idempotent: running the same insert twice inserts the text twice. If a script may run again, check the document's content in the callback first.
+- People who have the document open receive the server's edits the next time they open it, not live.
+- The Admin SDK bypasses security rules.
 
 ## Database layout
 
