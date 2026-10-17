@@ -97,6 +97,20 @@ async function exportDocument() {
 
 A failed write is retried automatically; `persist-error` is emitted and the save state stays `'error'` until a retry succeeds.
 
+## Signing out
+
+With `localCache` on, the last snapshot of each opened document stays in IndexedDB. `clearLocalCache()` deletes it for every document, in every tab:
+
+```ts
+import { clearLocalCache, type AdapterHandle } from 'firetap'
+
+async function signOut(adapter: AdapterHandle) {
+  // Close every open document first, or it may cache itself again.
+  await adapter.disconnect()
+  await clearLocalCache()
+}
+```
+
 ## Options
 
 | Option | Default | |

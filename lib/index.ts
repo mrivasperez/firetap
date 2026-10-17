@@ -8,4 +8,5 @@ export type { PeerInfo } from './core/types'
 export type { Logger } from './utils/logger'
 
 export { LoadError } from './firebase/document-store'
+export { clearLocalCache } from './utils/snapshot-cache'
 export type { SaveState } from './firebase/document-store'

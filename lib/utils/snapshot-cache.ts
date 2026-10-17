@@ -46,13 +46,35 @@ let database: Promise<IDBDatabase | null> | null = null;
 
 function openDatabase(): Promise<IDBDatabase | null> {
   if (typeof indexedDB === "undefined") return Promise.resolve(null);
-  database ??= new Promise((resolve) => {
+  if (database) return database;
+  const opening: Promise<IDBDatabase | null> = new Promise((resolve) => {
     const request = indexedDB.open(DB_NAME, 1);
     request.onupgradeneeded = () => request.result.createObjectStore(STORE);
-    request.onsuccess = () => resolve(request.result);
+    request.onsuccess = () => {
+      // Let clearLocalCache() in another tab delete the database.
+      request.result.onversionchange = () => {
+        request.result.close();
+        if (database === opening) database = null;
+      };
+      resolve(request.result);
+    };
     request.onerror = () => resolve(null);
   });
-  return database;
+  database = opening;
+  return opening;
+}
+
+/** Deletes every document firetap has cached on this device, in all tabs. */
+export async function clearLocalCache(): Promise<void> {
+  if (typeof indexedDB === "undefined") return;
+  const open = database;
+  database = null;
+  (await open)?.close();
+  await new Promise<void>((resolve, reject) => {
+    const request = indexedDB.deleteDatabase(DB_NAME);
+    request.onsuccess = () => resolve();
+    request.onerror = () => reject(request.error ?? new Error("Failed to delete the local cache"));
+  });
 }
 
 function isCachedSnapshot(value: unknown): value is CachedSnapshot {

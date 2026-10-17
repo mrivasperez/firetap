@@ -5,6 +5,7 @@
 ### New
 
 - `firetap/server`: `loadDocument()` and `updateDocument()` read and edit documents with the Firebase Admin SDK.
+- `clearLocalCache()` deletes the documents cached in IndexedDB, e.g. when signing out.
 
 ### Fixes
 
