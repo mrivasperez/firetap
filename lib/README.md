@@ -12,7 +12,7 @@ Real-time collaborative editing for [Yjs](https://docs.yjs.dev/) and [TipTap](ht
 npm install firetap yjs y-protocols firebase
 ```
 
-Firetap runs in the browser: it needs WebRTC, and uses `CompressionStream` and IndexedDB when they're available.
+Firetap runs in the browser: it needs WebRTC, and uses `CompressionStream` and IndexedDB when they're available. To read or edit documents from Node.js (20 or later) with the Admin SDK, see [On a server](#on-a-server).
 
 ## Quick start
 
@@ -97,6 +97,41 @@ async function exportDocument() {
 
 A failed write is retried automatically; `persist-error` is emitted and the save state stays `'error'` until a retry succeeds.
 
+## Use a TURN server in production
+
+With only STUN servers (the default), peers can't connect directly when one of them is behind a strict NAT or a firewall that blocks UDP, which is common on corporate networks, VPNs and some mobile networks. Those peers still exchange edits through Firebase, a few seconds late and at a higher Firebase cost, and they don't see each other's cursors. A TURN server relays the connection instead:
+
+```ts
+import { getDatabase } from 'firebase/database'
+import { createFirebaseYWebrtcAdapter } from 'firetap'
+
+const adapter = await createFirebaseYWebrtcAdapter({
+  docId: 'my-document',
+  firebaseDatabase: getDatabase(),
+  iceServers: [
+    { urls: 'stun:stun.l.google.com:19302' },
+    // From a TURN provider (e.g. Cloudflare, Twilio) or your own coturn server.
+    { urls: 'turn:turn.example.com:3478', username: 'user', credential: 'secret' },
+  ],
+})
+```
+
+Most providers issue short-lived credentials from your backend; fetch them before opening the document.
+
+## Signing out
+
+With `localCache` on, the last snapshot of each opened document stays in IndexedDB. `clearLocalCache()` deletes it for every document, in every tab:
+
+```ts
+import { clearLocalCache, type AdapterHandle } from 'firetap'
+
+async function signOut(adapter: AdapterHandle) {
+  // Close every open document first, or it may cache itself again.
+  await adapter.disconnect()
+  await clearLocalCache()
+}
+```
+
 ## Options
 
 | Option | Default | |
@@ -106,8 +141,8 @@ A failed write is retried automatically; `persist-error` is emitted and the save
 | `user` | `{ name: 'User-xxxxxx' }` | Shown to other collaborators. |
 | `peerId` | random UUID | Identifies this client. Must be unique per open document, so don't reuse a user id across tabs. |
 | `persistDebounceMs` | `1000` | How long local edits are batched before being written. |
-| `maxDirectPeers` | `6` | WebRTC connections per client. Larger rooms relay edits through other peers. |
-| `firebaseFallback` | `'auto'` | If no peer can be reached, receive others' edits from Firebase. `'off'` disables it. |
+| `maxDirectPeers` | `6` | WebRTC connections per client. Larger rooms relay edits through other peers. `0` turns WebRTC off, e.g. in tests: edits are then exchanged through Firebase only, which downloads every edit. |
+| `firebaseFallback` | `'auto'` | If a collaborator can't be reached over WebRTC, exchange edits with them through Firebase. `'off'` disables it. |
 | `localCache` | `true` | Keep the last downloaded snapshot in IndexedDB so reopening skips the download. Turn off if document content must not stay on the device. |
 | `iceServers` | Google's public STUN servers | STUN and TURN servers for WebRTC. Add a TURN server so peers behind strict firewalls can connect. |
 | `databasePaths` | `/documents/{docId}/...` | Where data is stored; see [Database layout](#database-layout). |
@@ -125,6 +160,7 @@ A failed write is retried automatically; `persist-error` is emitted and the save
 | `getSaveState()` | `'saved'`, `'saving'`, `'unsaved'` or `'error'`. |
 | `getConnectionStatus()` | Firebase connection: `'connecting'`, `'connected'` or `'disconnected'`. |
 | `getPeerCount()` | Number of direct WebRTC connections. |
+| `getPresentPeers()` | Everyone else who has the document open, as `{ id, name, connectedAt }`, whether or not they're connected directly. |
 | `getUserInfo()` | This client's `{ id, name, connectedAt }`. |
 | `on(event, callback)`, `off(event, callback)` | Subscribe to events. |
 
@@ -135,11 +171,41 @@ A failed write is retried automatically; `persist-error` is emitted and the save
 | `connection-state-changed` | `{ state }` | The Firebase connection goes up or down. |
 | `peer-joined` | `{ peerId, user }` | A direct WebRTC connection is established. |
 | `peer-left` | `{ peerId }` | A direct connection closed. |
+| `presence-changed` | `{ peers }` | Someone opened or closed the document; `peers` is the new `getPresentPeers()`. |
 | `sync-completed` | `{ docId, peerId, updateSize }` | The first sync with a newly connected peer finished. |
 | `save-state-changed` | `{ state }` | The save state changed. |
 | `persist-error` | `{ error }` | A write to Firebase failed (it will be retried). |
 | `document-persisted` | `{ docId, version }` | Recent edits were merged into a new stored snapshot. |
 | `error` | `{ error, context }` | Something else failed, e.g. announcing presence. |
+
+## On a server
+
+`firetap/server` reads and edits documents with the Firebase Admin SDK, for scripts and backends that create or change pages:
+
+```ts
+import { initializeApp } from 'firebase-admin/app'
+import { getDatabase } from 'firebase-admin/database'
+import { loadDocument, updateDocument } from 'firetap/server'
+
+initializeApp({ databaseURL: 'https://your-project-default-rtdb.firebaseio.com' })
+const database = getDatabase()
+
+// Creates the document if it doesn't exist. Only the edits made in the callback are saved.
+const updated = await updateDocument({ docId: 'my-document', database }, (ydoc) => {
+  ydoc.getText('notes').insert(0, 'Written by a script\n')
+})
+updated.destroy()
+
+const ydoc = await loadDocument({ docId: 'my-document', database })
+console.log(ydoc.getText('notes').toString())
+ydoc.destroy()
+```
+
+Both take `docId`, `database`, and optionally `databasePaths`, `logger`, `authorId` (stored as the author of the edits; default `server-<random id>`) and `authorName` (default `'Server'`). They reject with `LoadError` if the document can't be read, and `updateDocument` then saves nothing.
+
+- `updateDocument` isn't idempotent: running the same insert twice inserts the text twice. If a script may run again, check the document's content in the callback first.
+- People who have the document open receive the edits within a few seconds. While saving, the server adds itself to the document's presence list so their clients read the new edits from Firebase; it isn't included in `getPresentPeers()`.
+- The Admin SDK bypasses security rules.
 
 ## Database layout
 
@@ -211,7 +277,7 @@ To measure your own scenarios, see `bench/run.mjs` (`npm run bench:cost -w lib`)
 ## Limitations
 
 - **Offline edits are kept in memory only.** If a tab closes while it is offline and can't reach any peer, its unsaved edits are lost. `hasUnsavedChanges()` tells you when that could happen.
-- **WebRTC needs a network path.** Peers that can't connect directly need a TURN server (`iceServers`). Until then they still receive each other's edits through Firebase, with a few seconds' delay.
+- **WebRTC needs a network path.** Peers that can't connect directly need a TURN server (`iceServers`). Until then they still receive each other's edits through Firebase, with a few seconds' delay, but not each other's cursors.
 - **One client per peer ID.** Every open document needs its own `peerId`; the default is a fresh random ID.
 
 ## License

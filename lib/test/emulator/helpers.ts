@@ -104,3 +104,23 @@ export async function storedDoc(docRoot: string): Promise<import('yjs').Doc> {
   }
   return doc
 }
+
+let adminCounter = 0
+const adminApps: import('firebase-admin/app').App[] = []
+
+// The Admin SDK reaches the emulator through FIREBASE_DATABASE_EMULATOR_HOST.
+export async function createAdminDatabase() {
+  const { initializeApp } = await import('firebase-admin/app')
+  const { getDatabase } = await import('firebase-admin/database')
+  const app = initializeApp(
+    { projectId: 'demo-firetap', databaseURL: `http://${emulatorHost()}?ns=${NAMESPACE}` },
+    `firetap-admin-${process.pid}-${adminCounter++}`
+  )
+  adminApps.push(app)
+  return getDatabase(app)
+}
+
+export async function closeAdminDatabases(): Promise<void> {
+  const { deleteApp } = await import('firebase-admin/app')
+  await Promise.all(adminApps.splice(0).map((app) => deleteApp(app)))
+}

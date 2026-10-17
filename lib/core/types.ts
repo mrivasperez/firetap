@@ -13,9 +13,10 @@ export type AdapterOptions = {
   // Local edits are batched for this long before being written (default 1000ms).
   persistDebounceMs?: number;
   // Direct WebRTC links per peer (default 6); larger rooms relay through peers.
+  // 0 turns WebRTC off: edits are exchanged through Firebase only.
   maxDirectPeers?: number;
   databasePaths?: DatabasePathsConfig;
-  // "auto" (default): when no peer is reachable, receive edits from Firebase instead.
+  // "auto" (default): when a collaborator is unreachable over WebRTC, receive edits from Firebase.
   firebaseFallback?: "auto" | "off";
   // Keep the last downloaded snapshot in IndexedDB so reopening skips the download
   // (default true). Turn off if document content mustn't stay on the device.
@@ -30,6 +31,8 @@ export type AdapterEvents = {
   "connection-state-changed": { state: ConnectionState };
   "peer-joined": { peerId: string; user: PeerInfo };
   "peer-left": { peerId: string };
+  // Someone opened or closed the document.
+  "presence-changed": { peers: PeerInfo[] };
   "document-persisted": { docId: string; version: number };
   "save-state-changed": { state: SaveState };
   // Retried automatically; saveState stays "error" until a write succeeds.
@@ -46,6 +49,8 @@ export type AdapterHandle = {
   disconnect: () => Promise<void>;
   reconnect: () => Promise<void>;
   getPeerCount: () => number;
+  /** Everyone else who has the document open, connected directly or not. */
+  getPresentPeers: () => PeerInfo[];
   getConnectionStatus: () => ConnectionState;
   getUserInfo: () => PeerInfo;
   /** Resolves once Firebase has acknowledged every pending edit. */
@@ -71,6 +76,8 @@ export type PeerInfo = {
 export type PresenceEntry = {
   name: string;
   connectedAt: number | object; // server timestamp
+  rtc?: false; // WebRTC is turned off
+  server?: true; // firetap/server, present only while saving
 };
 
 export type SignalData = {

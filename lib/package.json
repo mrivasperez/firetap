@@ -1,6 +1,6 @@
 {
   "name": "firetap",
-  "version": "1.0.0-beta.1",
+  "version": "1.0.0-beta.2",
   "description": "Real-time collaborative editing adapter for TipTap, Yjs, and Firebase Realtime Database",
   "main": "./dist/index.js",
   "module": "./dist/index.mjs",
@@ -10,6 +10,11 @@
       "types": "./dist/index.d.ts",
       "import": "./dist/index.mjs",
       "require": "./dist/index.js"
+    },
+    "./server": {
+      "types": "./dist/server.d.ts",
+      "import": "./dist/server.mjs",
+      "require": "./dist/server.js"
     }
   },
   "files": [
@@ -56,14 +61,21 @@
   },
   "homepage": "https://github.com/mrivasperez/firetap#readme",
   "peerDependencies": {
-    "firebase": "^12.0.0",
+    "firebase": "^12.0.0 || ^13.0.0",
     "y-protocols": "^1.0.6",
     "yjs": "^13.6.0"
+  },
+  "peerDependenciesMeta": {
+    "firebase": {
+      "optional": true
+    }
   },
   "devDependencies": {
     "@types/node": "^24.7.2",
     "esbuild": "^0.25.10",
     "fake-indexeddb": "^6.2.6",
+    "firebase": "^13.0.0",
+    "firebase-admin": "^14.5.0",
     "playwright": "^1.56.1",
     "tsup": "^8.0.0",
     "typescript": "^5.9.3",

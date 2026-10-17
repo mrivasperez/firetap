@@ -1,5 +1,20 @@
 # Changelog
 
+## 1.0.0-beta.2
+
+### New
+
+- `firetap/server`: `loadDocument()` and `updateDocument()` read and edit documents with the Firebase Admin SDK. People with the document open receive the server's edits within a few seconds.
+- `clearLocalCache()` deletes the documents cached in IndexedDB, e.g. when signing out.
+- `getPresentPeers()` and the `presence-changed` event list everyone who has the document open. `peer-joined` and `peer-left` only cover direct WebRTC connections.
+- Works with Firebase 13 as well as 12.
+- `maxDirectPeers: 0` turns WebRTC off, so edits are exchanged through Firebase only, e.g. in tests. Peers that use WebRTC don't try to connect to such a client.
+
+### Fixes
+
+- A collaborator who can't connect to anyone over WebRTC is no longer invisible to the others. Peers that are connected to each other now also receive edits through Firebase while someone present is unreachable; one peer in each connected group downloads them and relays them to the rest.
+- A collaborator's cursor disappears as soon as they close the document, instead of sometimes lingering for 30 seconds.
+
 ## 1.0.0-beta.1
 
 This release reworks how documents are stored and synced. It isn't compatible with documents saved by the alpha releases.

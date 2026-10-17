@@ -48,6 +48,28 @@ describe('Firebase fallback', () => {
     await waitFor(() => text(b) === 'from B, from A', { timeout: 15_000, message: 'A -> B via Firebase' })
   })
 
+  it('lets connected peers see a collaborator neither of them can reach', async () => {
+    const basePath = uniqueBasePath('partial')
+    const logA = recordingLogger()
+    const logB = recordingLogger()
+    const a = await openAdapter(basePath, { logger: logA.logger })
+    const b = await openAdapter(basePath, { logger: logB.logger })
+    await waitFor(() => a.getPeerCount() === 1 && b.getPeerCount() === 1, { message: 'A and B connect' })
+
+    FakeRTCPeerConnection.isBlocked = () => true
+    const c = await openAdapter(basePath)
+    c.ydoc.getText('t').insert(0, 'from C')
+    await waitFor(() => text(a) === 'from C' && text(b) === 'from C', {
+      timeout: 15_000,
+      message: 'C -> A and B via Firebase',
+    })
+    a.ydoc.getText('t').insert(text(a).length, ', from A')
+    await waitFor(() => text(c) === 'from C, from A', { timeout: 15_000, message: 'A -> C via Firebase' })
+
+    // One of A and B downloads the log and relays it to the other.
+    expect([listening(logA.lines), listening(logB.lines)].filter(Boolean)).toHaveLength(1)
+  }, 30_000)
+
   it('stays off when disabled', async () => {
     FakeRTCPeerConnection.isBlocked = () => true
     const basePath = uniqueBasePath('off')

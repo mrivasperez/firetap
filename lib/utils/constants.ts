@@ -9,7 +9,8 @@ export const RETRY_MAX_MS = 60_000;
 export const ICE_GATHERING_MAX_MS = 3_000;
 export const ICE_SETTLE_MS = 300;
 export const ANTI_ENTROPY_INTERVAL_MS = 30_000;
-export const ISOLATION_DELAY_MS = 5_000;
+export const FALLBACK_DELAY_MS = 5_000;
+export const FALLBACK_LINGER_MS = 3_000;
 export const PEER_LOAD_TIMEOUT_MS = 2_000;
 export const PRESENCE_SETTLE_MS = 500;
 

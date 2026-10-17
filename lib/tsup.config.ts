@@ -1,7 +1,7 @@
 import { defineConfig } from 'tsup'
 
 export default defineConfig({
-  entry: ['index.ts'],
+  entry: ['index.ts', 'server.ts'],
   format: ['cjs', 'esm'],
   dts: true,
   sourcemap: true,
@@ -9,5 +9,5 @@ export default defineConfig({
   splitting: false,
   treeshake: true,
   minify: false,
-  external: ['firebase', 'yjs', 'y-protocols', 'lib0'],
+  external: ['firebase', 'firebase-admin', 'yjs', 'y-protocols', 'lib0'],
 })

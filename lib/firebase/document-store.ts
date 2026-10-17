@@ -1,20 +1,5 @@
 import * as Y from "yjs";
-import type { Database, DataSnapshot } from "firebase/database";
-import {
-  get,
-  onChildAdded,
-  onChildChanged,
-  onValue,
-  orderByKey,
-  push,
-  query,
-  ref,
-  remove,
-  runTransaction,
-  set,
-  startAfter,
-  update,
-} from "firebase/database";
+import type { DatabaseBackend } from "./backend";
 import { base64ToUint8Array, uint8ArrayToBase64 } from "../utils/base64";
 import { compressBytes, decompressBytes } from "../utils/compression";
 import { defaultLogger, type Logger } from "../utils/logger";
@@ -76,7 +61,7 @@ type StoredEntry = {
 export type DocumentStorePaths = { updates: string; snapshots: string; meta: string };
 
 export type DocumentStoreOptions = {
-  rtdb: Database;
+  db: DatabaseBackend;
   paths: DocumentStorePaths;
   ydoc: Y.Doc;
   peerId: string;
@@ -151,7 +136,7 @@ export class DocumentStore {
 
   async fetchMeta(): Promise<DocumentMeta> {
     try {
-      return readMeta(await get(ref(this.opts.rtdb, this.opts.paths.meta)));
+      return readMeta(await this.opts.db.get(this.opts.paths.meta));
     } catch (error) {
       throw new LoadError("Failed to read the document from Firebase", { cause: error });
     }
@@ -203,9 +188,9 @@ export class DocumentStore {
 
   // Null if a merge landed mid-read: the snapshot may not cover entries it deleted.
   private async readBase(haveGeneration?: number): Promise<Base | null> {
-    const { rtdb, paths } = this.opts;
+    const { db, paths } = this.opts;
     try {
-      const meta = readMeta(await get(ref(rtdb, paths.meta)));
+      const meta = readMeta(await db.get(paths.meta));
       let snapshot: Uint8Array | null = null;
       let snapshotStoredBytes = meta.bytes;
       if (meta.snapshot && meta.generation !== haveGeneration) {
@@ -215,7 +200,7 @@ export class DocumentStore {
 
       const { entries, entryStoredBytes } = await this.readLog();
 
-      const after = readMeta(await get(ref(rtdb, paths.meta)));
+      const after = readMeta(await db.get(paths.meta));
       if (after.generation !== meta.generation) return null;
 
       return {
@@ -233,23 +218,23 @@ export class DocumentStore {
   }
 
   private async readLog(): Promise<{ entries: Map<string, Uint8Array>; entryStoredBytes: number }> {
-    const log = await get(ref(this.opts.rtdb, this.opts.paths.updates));
+    const log = (await this.opts.db.get(this.opts.paths.updates)) as Record<string, unknown> | null;
     const entries = new Map<string, Uint8Array>();
     let entryStoredBytes = 0;
     const pending: Promise<void>[] = [];
-    log.forEach((child) => {
-      const entry = child.val() as StoredEntry | null;
+    for (const [key, value] of Object.entries(log ?? {})) {
+      const entry = value as StoredEntry | null;
       const data = entryData(entry);
-      if (data === undefined) return;
-      if (data === null) throw new LoadError(`Malformed log entry ${child.key}`);
+      if (data === undefined) continue;
+      if (data === null) throw new LoadError(`Malformed log entry ${key}`);
       entryStoredBytes += data.length;
       const bytes = base64ToUint8Array(data);
       pending.push(
         (entry!.gz ? decompressBytes(bytes) : Promise.resolve(bytes)).then((b) => {
-          entries.set(child.key!, b);
+          entries.set(key, b);
         })
       );
-    });
+    }
     await Promise.all(pending);
     return { entries, entryStoredBytes };
   }
@@ -283,8 +268,8 @@ export class DocumentStore {
       this.opts.logger.debug("Loaded the snapshot from the local cache");
       return cached;
     }
-    const stored = await get(ref(this.opts.rtdb, `${this.opts.paths.snapshots}/${meta.snapshot}`));
-    const parts = stored.exists() ? partsOf(stored.val()) : null;
+    const stored = await this.opts.db.get(`${this.opts.paths.snapshots}/${meta.snapshot}`);
+    const parts = stored !== null ? partsOf(stored) : null;
     if (!parts || parts.length !== meta.parts) return null;
     const snapshot = await decompressBytes(base64ToUint8Array(parts.join("")));
     this.cacheSnapshot(meta.snapshot!, meta.bytes, snapshot);
@@ -307,7 +292,7 @@ export class DocumentStore {
   private async doMerge(refreshLog: boolean): Promise<boolean> {
     const base = this.base;
     if (!base || (!refreshLog && base.entries.size === 0)) return false;
-    const { rtdb, paths, peerId, logger } = this.opts;
+    const { db, paths, peerId, logger } = this.opts;
     if (base.snapshotKey && !base.snapshot) {
       // Peers gave us this snapshot's content, but a merge must start from stored bytes.
       const meta = await this.fetchMeta();
@@ -315,24 +300,23 @@ export class DocumentStore {
       base.snapshot = await this.snapshotFor(meta);
       if (!base.snapshot) return false;
     }
-    const metaRef = ref(rtdb, paths.meta);
     const now = () => Date.now() + this.serverOffset;
     await this.refreshServerOffset();
 
-    const leased = await runTransaction(metaRef, (current) => {
+    const leased = await db.transaction(paths.meta, (current) => {
       if (current === null && base.generation !== 0) return null;
-      const meta = readMetaValue(current);
+      const meta = readMeta(current);
       if (meta.generation !== base.generation) return undefined;
       if (meta.lease && meta.lease.holder !== peerId && meta.lease.until > now()) return undefined;
       return { ...meta, lease: { holder: peerId, until: now() + MERGE_LEASE_MS } };
     });
-    if (!leased.committed || readMeta(leased.snapshot).lease?.holder !== peerId) return false;
+    if (!leased.committed || readMeta(leased.value).lease?.holder !== peerId) return false;
 
     // Holding the lease, nobody else can delete entries while we read them.
     const entries = refreshLog ? (await this.readLog()).entries : base.entries;
     if (entries.size === 0) {
-      await runTransaction(metaRef, (current) =>
-        current === null ? null : { ...readMetaValue(current), lease: null }
+      await db.transaction(paths.meta, (current) =>
+        current === null ? null : { ...readMeta(current), lease: null }
       );
       return false;
     }
@@ -354,19 +338,19 @@ export class DocumentStore {
     // Unique per attempt, so a client that loses the race can't overwrite the winner's parts.
     const snapshotKey = `${newGeneration}-${randomId().slice(0, 8)}`;
 
-    const snapshotRef = ref(rtdb, `${paths.snapshots}/${snapshotKey}`);
+    const snapshotPath = `${paths.snapshots}/${snapshotKey}`;
     try {
       if (encoded.length <= STORED_PART_CHARS) {
-        await set(snapshotRef, parts);
+        await db.set(snapshotPath, parts);
       } else {
         for (let i = 0; i < parts.length; i++) {
-          await set(ref(rtdb, `${paths.snapshots}/${snapshotKey}/${i}`), parts[i]);
+          await db.set(`${snapshotPath}/${i}`, parts[i]);
         }
       }
-      const committed = await runTransaction(metaRef, (current) => {
+      const committed = await db.transaction(paths.meta, (current) => {
         // An empty local cache isn't the server's value; returning null makes Firebase check.
         if (current === null) return null;
-        const meta = readMetaValue(current);
+        const meta = readMeta(current);
         if (meta.generation !== base.generation || meta.lease?.holder !== peerId) return undefined;
         const next: DocumentMeta = {
           generation: newGeneration,
@@ -377,24 +361,24 @@ export class DocumentStore {
         };
         return next;
       });
-      const result = readMeta(committed.snapshot);
+      const result = readMeta(committed.value);
       if (!committed.committed || result.snapshot !== snapshotKey) {
-        await remove(snapshotRef);
+        await db.remove(snapshotPath);
         return false;
       }
     } catch (error) {
-      remove(snapshotRef).catch(() => {});
+      db.remove(snapshotPath).catch(() => {});
       throw error;
     }
 
     // Delete exactly the keys read; entries written since are kept.
     const cleanup: Record<string, null> = {};
     entries.forEach((_bytes, key) => (cleanup[key] = null));
-    await update(ref(rtdb, paths.updates), cleanup).catch((error) =>
+    await db.update(paths.updates, cleanup).catch((error) =>
       logger.warn("Merged, but failed to delete merged log entries:", error)
     );
     if (base.snapshotKey) {
-      await remove(ref(rtdb, `${paths.snapshots}/${base.snapshotKey}`)).catch((error) =>
+      await db.remove(`${paths.snapshots}/${base.snapshotKey}`).catch((error) =>
         logger.warn("Merged, but failed to delete the old snapshot:", error)
       );
     }
@@ -416,21 +400,8 @@ export class DocumentStore {
   }
 
   private serverOffset = 0;
-  private refreshServerOffset(): Promise<void> {
-    // get() doesn't support .info paths.
-    return new Promise((resolve) => {
-      let unsubscribe = () => {};
-      const timer = setTimeout(() => {
-        unsubscribe();
-        resolve(); // fall back to the local clock
-      }, 1000);
-      unsubscribe = onValue(ref(this.opts.rtdb, ".info/serverTimeOffset"), (snapshot) => {
-        if (typeof snapshot.val() === "number") this.serverOffset = snapshot.val();
-        clearTimeout(timer);
-        unsubscribe();
-        resolve();
-      });
-    });
+  private async refreshServerOffset(): Promise<void> {
+    this.serverOffset = (await this.opts.db.serverTimeOffset()) ?? this.serverOffset;
   }
 
   start(): void {
@@ -456,14 +427,14 @@ export class DocumentStore {
     return this.stopListening !== null;
   }
 
-  // Only for clients that can't reach any peer: every client downloading every
-  // edit would cost far more than syncing peer to peer.
+  // Only while some collaborator can't be reached over WebRTC: every client
+  // downloading every edit would cost far more than syncing peer to peer.
   async startLogListener(): Promise<void> {
-    if (this.stopListening || !this.running || !this.base) return;
-    const { rtdb, paths, logger } = this.opts;
+    const { db, paths, logger } = this.opts;
+    if (this.stopListening || !this.running || !this.base || !db.watchChildren) return;
     this.stopListening = () => {};
 
-    const meta = readMeta(await get(ref(rtdb, paths.meta)));
+    const meta = readMeta(await db.get(paths.meta));
     if (meta.generation !== this.base.generation) {
       // A merge may have deleted entries we never saw; they're in the new snapshot.
       const base = await this.readBase();
@@ -476,17 +447,12 @@ export class DocumentStore {
     }
     if (!this.running || !this.stopListening) return;
 
-    const log = this.latestKey
-      ? query(ref(rtdb, paths.updates), orderByKey(), startAfter(this.latestKey))
-      : ref(rtdb, paths.updates);
-    const onEntry = (child: DataSnapshot) => {
-      this.applyLogEntry(child).catch((error) =>
-        logger.warn(`Failed to apply log entry ${child.key}:`, error)
+    this.stopListening = db.watchChildren(paths.updates, this.latestKey, (key, value) => {
+      this.applyLogEntry(key, value).catch((error) =>
+        logger.warn(`Failed to apply log entry ${key}:`, error)
       );
-    };
-    const unsubscribers = [onChildAdded(log, onEntry), onChildChanged(log, onEntry)];
-    this.stopListening = () => unsubscribers.forEach((unsubscribe) => unsubscribe());
-    logger.debug("No peer is reachable; receiving edits from Firebase");
+    });
+    logger.debug("Some collaborators are unreachable; receiving edits from Firebase");
   }
 
   stopLogListener(): void {
@@ -496,10 +462,9 @@ export class DocumentStore {
     this.opts.logger.debug("Stopped receiving edits from Firebase");
   }
 
-  private async applyLogEntry(child: DataSnapshot): Promise<void> {
-    const key = child.key!;
+  private async applyLogEntry(key: string, value: unknown): Promise<void> {
     if (this.knownKeys.has(key)) return;
-    const entry = child.val() as StoredEntry | null;
+    const entry = value as StoredEntry | null;
     const data = entryData(entry);
     if (data === undefined) return;
     if (data === null) throw new Error("malformed entry");
@@ -672,7 +637,7 @@ export class DocumentStore {
   }
 
   private async writeEntry(update: Uint8Array): Promise<void> {
-    const { rtdb, paths, peerId } = this.opts;
+    const { db, paths, peerId } = this.opts;
     let bytes = update;
     let gz = false;
     if (update.length >= LOG_ENTRY_GZIP_MIN_BYTES) {
@@ -683,21 +648,22 @@ export class DocumentStore {
       }
     }
     const data = uint8ArrayToBase64(bytes);
-    const entryRef = push(ref(rtdb, paths.updates));
-    this.rememberKey(entryRef.key!);
+    const key = db.newKey(paths.updates);
+    this.rememberKey(key);
+    const entryPath = `${paths.updates}/${key}`;
     const header = { by: peerId, ...(gz ? { gz: 1 as const } : {}) };
 
     if (data.length <= STORED_PART_CHARS) {
-      await set(entryRef, { ...header, data });
+      await db.set(entryPath, { ...header, data });
       return;
     }
     // Readers skip the entry until the part count is written.
     const parts = splitString(data, STORED_PART_CHARS);
-    await set(entryRef, { ...header, p: { 0: parts[0] } });
+    await db.set(entryPath, { ...header, p: { 0: parts[0] } });
     for (let i = 1; i < parts.length; i++) {
-      await set(ref(rtdb, `${paths.updates}/${entryRef.key}/p/${i}`), parts[i]);
+      await db.set(`${entryPath}/p/${i}`, parts[i]);
     }
-    await set(ref(rtdb, `${paths.updates}/${entryRef.key}/n`), parts.length);
+    await db.set(`${entryPath}/n`, parts.length);
   }
 
   private scheduleRetry(): void {
@@ -720,11 +686,7 @@ export class DocumentStore {
   }
 }
 
-function readMeta(snapshot: DataSnapshot): DocumentMeta {
-  return readMetaValue(snapshot.exists() ? snapshot.val() : null);
-}
-
-function readMetaValue(value: unknown): DocumentMeta {
+function readMeta(value: unknown): DocumentMeta {
   const v = (value ?? {}) as Partial<DocumentMeta>;
   return {
     generation: typeof v.generation === "number" ? v.generation : 0,

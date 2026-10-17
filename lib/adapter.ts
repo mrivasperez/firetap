@@ -3,6 +3,7 @@ import { Awareness } from "y-protocols/awareness";
 import { encodeAwarenessUpdate } from "y-protocols/awareness";
 import { SimplePeerManager, RemoteOrigin } from "./core/peer-manager";
 import { DocumentStore } from "./firebase/document-store";
+import { webBackend } from "./firebase/web-backend";
 import type {
   AdapterOptions,
   AdapterEvents,
@@ -74,9 +75,9 @@ export async function createFirebaseYWebrtcAdapter(
     },
     onPersisted: (clientId, clock) => store.current?.notePersisted(clientId, clock),
     onPeerGone: (clientIds) => store.current?.rescue(clientIds),
-    onIsolationChange: (isolated) => {
+    onFallbackChange: (active) => {
       if (firebaseFallback === "off") return;
-      if (isolated) {
+      if (active) {
         store.current?.startLogListener().catch((error) =>
           logger.warn("Failed to listen for edits in Firebase:", error)
         );
@@ -87,7 +88,7 @@ export async function createFirebaseYWebrtcAdapter(
   });
 
   const documentStore = new DocumentStore({
-    rtdb: firebaseDatabase,
+    db: webBackend(firebaseDatabase),
     paths,
     ydoc,
     peerId,
@@ -112,7 +113,11 @@ export async function createFirebaseYWebrtcAdapter(
     // so we only download the log.
     const meta = await documentStore.fetchMeta();
     let haveGeneration: number | undefined;
-    if (meta.snapshot && !(await documentStore.hasCachedSnapshot(meta))) {
+    if (
+      meta.snapshot &&
+      peerManager.usesWebRTC &&
+      !(await documentStore.hasCachedSnapshot(meta))
+    ) {
       await peerManager.start();
       if (await peerManager.waitForPeerSync(meta.generation, PEER_LOAD_TIMEOUT_MS)) {
         haveGeneration = meta.generation;
@@ -232,6 +237,7 @@ export async function createFirebaseYWebrtcAdapter(
     disconnect,
     reconnect: () => peerManager.reconnect(),
     getPeerCount: () => peerManager.getPeerCount(),
+    getPresentPeers: () => peerManager.getPresentPeers(),
     getConnectionStatus: () => peerManager.getConnectionStatus(),
     getUserInfo: () => peerInfo,
     flush: () => documentStore.flush(),
